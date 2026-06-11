@@ -29,7 +29,7 @@ WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "turn_worker.p
 JWT_PUBLIC_KEY = os.environ["RUNTIME_JWT_PUBLIC_KEY"]  # PEM; baked in, never a network JWKS
 JWT_ISS = os.environ.get("RUNTIME_JWT_ISS", "insightfulpipe")
 JWT_AUD = os.environ.get("RUNTIME_JWT_AUD", "ip-agent-runtime")
-MAX_WALL_SECONDS = int(os.environ.get("RUNTIME_MAX_WALL_SECONDS", "150"))
+MAX_WALL_SECONDS = int(os.environ.get("RUNTIME_MAX_WALL_SECONDS", "300"))
 MAX_STDOUT_BYTES = int(os.environ.get("RUNTIME_MAX_STDOUT_BYTES", str(8 * 1024 * 1024)))
 # Local/dev escape hatch ONLY — never set in prod. Gates the no-IAM single-gate
 # fallback and the off-registry base_url passthrough (both unsafe under real IAM).

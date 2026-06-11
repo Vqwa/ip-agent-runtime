@@ -698,6 +698,7 @@ _BACKEND_FALLBACK_DESCRIPTIONS: dict[str, str] = {
     "modal": "a Modal sandbox (Linux)",
     "managed_modal": "a managed Modal sandbox (Linux)",
     "daytona": "a Daytona workspace (Linux)",
+    "e2b": "an E2B Firecracker microVM (Linux)",
     "ssh": "a remote host reached over SSH (likely Linux)",
 }
 

@@ -18,7 +18,7 @@ COPY . /app
 
 # Hermes core + runtime extras: E2B sandbox backend, MCP client, JWT, server.
 RUN pip install --no-cache-dir --timeout 120 --retries 10 -e . \
-    && pip install --no-cache-dir --timeout 120 --retries 10 e2b mcp "pyjwt[crypto]" "uvicorn[standard]"
+    && pip install --no-cache-dir --timeout 120 --retries 10 e2b mcp ddgs "pyjwt[crypto]" "uvicorn[standard]"
 
 # Non-root.
 RUN useradd -m -u 10001 runtime && chown -R runtime:runtime /app

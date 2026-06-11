@@ -48,6 +48,8 @@ def _materialize_home(req: dict) -> None:
         )
     else:
         config_yaml = "mcp_servers: {}\n"
+    # Keyless DuckDuckGo backend so web_search works without a provider key.
+    config_yaml += "web:\n  backend: ddgs\n"
     with open(os.path.join(_HOME, "config.yaml"), "w") as f:
         f.write(config_yaml)
     mem = req.get("memory", {})
@@ -112,7 +114,7 @@ def run_turn(req: dict) -> dict:
         api_key=llm["api_key"],
         base_url=base_url,
         enabled_toolsets=toolsets,
-        max_iterations=int(limits.get("max_iterations", 16)),
+        max_iterations=int(limits.get("max_iterations", 90)),  # stock Hermes default (parity)
         ephemeral_system_prompt=session.get("system_prompt") or None,
         quiet_mode=True,
         skip_context_files=True,

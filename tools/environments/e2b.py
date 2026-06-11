@@ -75,6 +75,12 @@ class E2BEnvironment(BaseEnvironment):
             getattr(self._sandbox, "sandbox_id", "?"),
             "on" if allow_internet_access else "OFF",
         )
+        # Parity with docker.py/modal.py: snapshot the login shell so env vars and
+        # functions persist across terminal calls. Guarded — failure = stateless, not broken.
+        try:
+            self.init_session()
+        except Exception as e:
+            logger.warning("E2B: init_session snapshot failed, continuing stateless: %s", e)
 
     def _before_execute(self) -> None:
         # Ephemeral single-turn sandbox: nothing to sync. A dead/expired sandbox

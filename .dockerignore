@@ -52,6 +52,11 @@ ui-tui/packages/hermes-ink/dist/
 .coverage
 htmlcov/
 
+# Test-only stubs — must never ship in the runtime image (stub_mcp writes the
+# inbound bearer token to /tmp). Unreachable at runtime, but no reason to ship.
+stub_llm.py
+stub_mcp.py
+
 # Documentation
 *.md
 
