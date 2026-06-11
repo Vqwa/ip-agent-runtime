@@ -1,0 +1,60 @@
+# InsightfulPipe Hosted Agents runtime — Cloud Run service, as Infrastructure-as-Code.
+#
+# Codifies the live `ip-agent-runtime` service (review finding DC-1: isolation
+# flags were uncodified console state). Apply with:
+#
+#   gcloud run services replace deploy/service.yaml \
+#     --region=europe-west1 --project=ip-agent-runtime
+#
+# NOTE: a Knative manifest does NOT carry the run.invoker IAM binding. The
+# service is deployed --no-allow-unauthenticated (no public invoker is granted
+# here); the Django dispatch SA must be granted run.invoker separately — see
+# deploy/README.md. deploy/audit_iam.sh enforces that the policy stays private.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ip-agent-runtime
+  labels:
+    cloud.googleapis.com/location: europe-west1
+  annotations:
+    # Ingress is intentionally "all": external callers reach the URL, but every
+    # request is IAM-gated (--no-allow-unauthenticated). The IAM policy, not
+    # ingress, is the access boundary — audit_iam.sh asserts it stays private.
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # max-instances 3. (No min-scale: scales to zero when idle.)
+        autoscaling.knative.dev/maxScale: "3"
+    spec:
+      # Least-privilege runtime SA. INVARIANT (DC-1): this SA must hold
+      # secretAccessor on ONLY jwt-public-key + e2b-api-key — never any
+      # per-tenant secret. Enforced by audit_iam.sh.
+      serviceAccountName: agent-runtime@ip-agent-runtime.iam.gserviceaccount.com
+      # Concurrency 1: one turn per container, no co-tenant in a container.
+      containerConcurrency: 1
+      containers:
+        - image: europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v3
+          ports:
+            - name: http1
+              containerPort: 8080
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            # Platform secrets mounted from Secret Manager (latest version).
+            - name: RUNTIME_JWT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jwt-public-key
+                  key: latest
+            - name: E2B_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: e2b-api-key
+                  key: latest
+            # Plain (non-secret) env.
+            - name: E2B_TEMPLATE
+              value: "6mumyphaqcu0ttayvgp1"

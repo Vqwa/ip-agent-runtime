@@ -73,9 +73,12 @@ def run_turn(req: dict) -> dict:
     provider = llm["provider"]
     base_url = llm.get("base_url") or _PROVIDER_BASE_URLS.get(provider)
     allowed = set(_PROVIDER_BASE_URLS.values())
-    # Test affordance (gated): only allows URLs explicitly listed in the env.
-    extra = os.environ.get("RUNTIME_EXTRA_BASE_URLS", "")
-    allowed |= {u.strip() for u in extra.split(",") if u.strip()}
+    # Off-registry base_url is a credential/transcript-exfil vector (the LLM call
+    # originates from THIS process, outside the sandbox egress floor). The extra-URL
+    # env is honored ONLY in the gated local/no-IAM mode; prod ignores it entirely.
+    if os.environ.get("RUNTIME_ALLOW_LOCAL_NO_IAM") == "1":
+        extra = os.environ.get("RUNTIME_EXTRA_BASE_URLS", "")
+        allowed |= {u.strip() for u in extra.split(",") if u.strip()}
     if base_url not in allowed:
         raise ValueError(f"refusing off-registry base_url for provider {provider!r}")
 

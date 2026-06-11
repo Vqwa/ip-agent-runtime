@@ -31,6 +31,9 @@ JWT_ISS = os.environ.get("RUNTIME_JWT_ISS", "insightfulpipe")
 JWT_AUD = os.environ.get("RUNTIME_JWT_AUD", "ip-agent-runtime")
 MAX_WALL_SECONDS = int(os.environ.get("RUNTIME_MAX_WALL_SECONDS", "150"))
 MAX_STDOUT_BYTES = int(os.environ.get("RUNTIME_MAX_STDOUT_BYTES", str(8 * 1024 * 1024)))
+# Local/dev escape hatch ONLY — never set in prod. Gates the no-IAM single-gate
+# fallback and the off-registry base_url passthrough (both unsafe under real IAM).
+LOCAL_NO_IAM = os.environ.get("RUNTIME_ALLOW_LOCAL_NO_IAM") == "1"
 # E2B_API_KEY + E2B_TEMPLATE are read from this process's env and passed through.
 
 
@@ -66,9 +69,12 @@ def _child_env(home: str) -> dict:
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "PYTHONUNBUFFERED": "1",
     }
-    for passthrough in ("E2B_API_KEY", "E2B_TEMPLATE", "LANG", "LC_ALL", "RUNTIME_EXTRA_BASE_URLS"):
-        if passthrough in os.environ:
-            env[passthrough] = os.environ[passthrough]
+    passthrough = ["E2B_API_KEY", "E2B_TEMPLATE", "LANG", "LC_ALL"]
+    if LOCAL_NO_IAM:
+        passthrough.append("RUNTIME_EXTRA_BASE_URLS")  # off-registry base_url: dev only
+    for key in passthrough:
+        if key in os.environ:
+            env[key] = os.environ[key]
     return env
 
 
@@ -81,9 +87,11 @@ async def turn(request: Request, authorization: str = Header(default=""),
     except ValueError:
         raise HTTPException(422, "body is not valid JSON")
     # Under Cloud Run IAM, Authorization carries the Google identity token, so the
-    # RS256 turn JWT travels in X-Runtime-Authorization. Fall back to Authorization
-    # for local / no-IAM runs.
-    _verify_jwt(x_runtime_authorization or authorization, body)
+    # RS256 turn JWT travels in X-Runtime-Authorization. The Authorization fallback
+    # exists ONLY for local/no-IAM runs (gated) — in prod we require the dedicated
+    # header so a misconfigured/absent IAM gate can never silently become single-gate.
+    token_header = x_runtime_authorization or (authorization if LOCAL_NO_IAM else "")
+    _verify_jwt(token_header, body)
 
     home = tempfile.mkdtemp(prefix="turn-")
     t0 = time.monotonic()
@@ -113,8 +121,16 @@ async def turn(request: Request, authorization: str = Header(default=""),
         resp = json.loads(out.strip().splitlines()[-1])   # last line = result channel
     except (ValueError, IndexError):
         raise HTTPException(502, "child produced no valid result")
-    if resp.get("turn_id") != body.get("turn_id") or "status" not in resp:
+    if "status" not in resp:
         raise HTTPException(502, "child result failed schema check")
+    # A worker that errored before parsing the request can't echo turn_id; pass its
+    # structured error through (stamped with the known turn_id) instead of masking it
+    # as a generic 502 — preserves the real cause for diagnosis.
+    if resp.get("turn_id") != body.get("turn_id"):
+        if resp.get("status") == "error":
+            resp["turn_id"] = body.get("turn_id")
+        else:
+            raise HTTPException(502, "child result turn_id mismatch")
     resp.setdefault("usage", {})["parent_wall_ms"] = int((time.monotonic() - t0) * 1000)
     return resp
 
