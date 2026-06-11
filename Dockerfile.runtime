@@ -1,0 +1,31 @@
+# InsightfulPipe Hosted Agents — runtime image (the Hermes fork).
+# One turn per request; code-exec offloaded to E2B; secrets via stdin per turn.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    HERMES_DISABLE_LAZY_INSTALLS=1 \
+    TERMINAL_ENV=e2b
+
+WORKDIR /app
+
+# ca-certificates for TLS; libffi for cffi (pyjwt[crypto] transitive).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Source (TS/desktop/docs/tests excluded via .dockerignore).
+COPY . /app
+
+# Hermes core + runtime extras: E2B sandbox backend, MCP client, JWT, server.
+RUN pip install --no-cache-dir --timeout 120 --retries 10 -e . \
+    && pip install --no-cache-dir --timeout 120 --retries 10 e2b mcp "pyjwt[crypto]" "uvicorn[standard]"
+
+# Non-root.
+RUN useradd -m -u 10001 runtime && chown -R runtime:runtime /app
+USER runtime
+
+# Provided at deploy (NOT baked secrets): RUNTIME_JWT_PUBLIC_KEY (public, fine),
+# E2B_API_KEY, E2B_TEMPLATE. Tenant secrets arrive per-turn via stdin only.
+# Cloud Run: internal ingress + IAM (Django SA is the only invoker).
+EXPOSE 8080
+CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]

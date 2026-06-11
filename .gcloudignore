@@ -1,0 +1,15 @@
+.git
+.venv
+node_modules
+**/__pycache__
+**/*.pyc
+ui-tui
+web
+website
+apps/desktop
+docs
+tests
+infographic
+locales
+nix
+packaging

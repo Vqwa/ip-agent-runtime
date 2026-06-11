@@ -1332,6 +1332,17 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             persistent_filesystem=persistent, task_id=task_id,
         )
 
+    elif env_type == "e2b":
+        # InsightfulPipe Hosted Agents: code-exec in a disposable E2B Firecracker
+        # microVM (egress off, NO ~/.hermes credential sync). Always ephemeral;
+        # template (pandas/etc) comes from E2B_TEMPLATE env. Lazy import.
+        from tools.environments.e2b import E2BEnvironment as _E2BEnvironment
+        return _E2BEnvironment(
+            cwd="/home/user", timeout=timeout,
+            cpu=int(cpu), memory=memory, disk=disk,
+            persistent_filesystem=False, task_id=task_id,
+        )
+
     elif env_type == "ssh":
         if not ssh_config or not ssh_config.get("host") or not ssh_config.get("user"):
             raise ValueError("SSH environment requires ssh_host and ssh_user to be configured")
@@ -1347,7 +1358,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     else:
         raise ValueError(
             f"Unknown environment type: {env_type}. Use 'local', 'docker', "
-            f"'singularity', 'modal', 'daytona', or 'ssh'"
+            f"'singularity', 'modal', 'daytona', 'e2b', or 'ssh'"
         )
 
 
@@ -2550,10 +2561,14 @@ def check_terminal_requirements() -> bool:
             from daytona import Daytona  # noqa: F401 — SDK presence check
             return os.getenv("DAYTONA_API_KEY") is not None
 
+        elif env_type == "e2b":
+            import e2b  # noqa: F401 — SDK presence check
+            return os.getenv("E2B_API_KEY") is not None
+
         else:
             logger.error(
                 "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, singularity, "
-                "modal, daytona, ssh.",
+                "modal, daytona, e2b, ssh.",
                 env_type,
             )
             return False

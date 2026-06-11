@@ -69,6 +69,10 @@ runtime/
 # Desktop app source (Tauri/Electron); never installed in the container
 apps/
 
+# TS frontends — not on the Python turn path (Hosted Agents runtime is headless)
+web/
+ui-tui/
+
 # Test suite — not shipped in production images
 tests/
 
