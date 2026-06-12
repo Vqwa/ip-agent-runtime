@@ -23,6 +23,7 @@ git diff --name-status origin/main
 | `ci_guard_runtime.py` | CI assertion that CLI/gateway/preprocessors stay unreachable in the serving path. |
 | `RUNTIME_README.md`, `FORK_DIVERGENCES.md` | This fork's docs. |
 | `stub_llm.py`, `stub_mcp.py` | Local test stubs only. **Excluded from the image** via `.dockerignore` — never shipped. |
+| `plugins/web/oxylabs/` | New web provider (AI-Search + AI-Scraper via `oxylabs-ai-studio`), mirroring the `ddgs`/`firecrawl` plugin shape. BYOK `OXYLABS_API_KEY`, injected per-turn. Not in upstream (the Hostinger template's Oxylabs field is packaging, not upstream code). |
 
 ## Modified upstream files (kept minimal; each line justified)
 
@@ -47,7 +48,11 @@ Hermes, they don't modify it:
   `memory`, `clarify`, `terminal` (E2B), `file` (E2B-scoped), `todo`, `web`
   (SSRF-gated), `vision` (SSRF-gated). All are upstream toolsets, unmodified.
 - **`max_iterations = 90`** — stock Hermes default (was 16).
-- **`web.backend: ddgs`** in `config.yaml` — keyless search.
+- **`web.backend`** in `config.yaml` — `oxylabs` when the request carries a BYOK
+  key (injected as `OXYLABS_API_KEY`), else keyless `ddgs`. Name whitelisted.
+- **Providers** — base-URL allowlist: openai, openrouter, anthropic, nexos
+  (`api.nexos.ai/v1`), deepseek, xai, gemini (OpenAI-compat endpoint). Hermes
+  picks the adapter from the host, so these are config entries, not code forks.
 - **`skip_context_files=True`, `session_db=None`, `save_trajectories=False`** —
   ephemeral per-turn model; no host project files or cross-session DB.
 

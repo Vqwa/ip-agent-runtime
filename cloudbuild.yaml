@@ -5,9 +5,9 @@ steps:
       - -f
       - Dockerfile.runtime
       - -t
-      - europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v4
+      - europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v6
       - .
 images:
-  - europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v4
+  - europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v6
 options:
   machineType: E2_HIGHCPU_8

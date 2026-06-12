@@ -29,6 +29,10 @@ _PROVIDER_BASE_URLS = {  # base_url is NOT free-form (PLAN §6); pin per provide
     "openai": "https://api.openai.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "anthropic": "https://api.anthropic.com",
+    "nexos": "https://api.nexos.ai/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "xai": "https://api.x.ai/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
 }
 
 
@@ -48,8 +52,13 @@ def _materialize_home(req: dict) -> None:
         )
     else:
         config_yaml = "mcp_servers: {}\n"
-    # Keyless DuckDuckGo backend so web_search works without a provider key.
-    config_yaml += "web:\n  backend: ddgs\n"
+    # Web backend: the agent's choice (BYOK key injected as OXYLABS_API_KEY), else
+    # keyless DuckDuckGo. Whitelist the name — it is interpolated into YAML.
+    web = req["config"].get("web") or {}
+    backend = web.get("backend") if web.get("backend") in {"ddgs", "oxylabs", "brave-free"} else "ddgs"
+    config_yaml += f"web:\n  backend: {backend}\n"
+    if backend == "oxylabs" and web.get("api_key"):
+        os.environ["OXYLABS_API_KEY"] = web["api_key"]
     with open(os.path.join(_HOME, "config.yaml"), "w") as f:
         f.write(config_yaml)
     mem = req.get("memory", {})

@@ -1,0 +1,7 @@
+name: web-oxylabs
+version: 1.0.0
+description: "Oxylabs AI Studio web search + extract (AI-Search + AI-Scraper). Requires OXYLABS_API_KEY. Install with `pip install oxylabs-ai-studio`."
+author: InsightfulPipe
+kind: backend
+provides_web_providers:
+  - oxylabs
