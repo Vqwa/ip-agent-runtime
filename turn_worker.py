@@ -34,7 +34,7 @@ _PROVIDER_BASE_URLS = {  # base_url is NOT free-form (PLAN §6); pin per provide
     "anthropic": "https://api.anthropic.com",
     "nexos": "https://api.nexos.ai/v1",
     "deepseek": "https://api.deepseek.com/v1",
-    "xai": "https://api.x.ai/v1",
+    # "xai" removed — dropped product-wide; keep in lockstep with Django.
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
     # OpenAI-compatible providers (Hermes canonical set) — not in _HERMES_KNOWN_PROVIDERS,
     # so provider is passed as None and Hermes auto-detects the OpenAI wire from base_url.
@@ -59,15 +59,14 @@ _WEB_BACKENDS = {
     "firecrawl": "FIRECRAWL_API_KEY",
     "parallel": "PARALLEL_API_KEY",
     "brave-free": "BRAVE_SEARCH_API_KEY",
-    "xai": "XAI_API_KEY",
     # NOTE: searxng intentionally excluded — its "key" is an instance URL the worker
     # would fetch host-side (SSRF to metadata/private IPs). All others auth via a key.
 }
 _BROWSER_PROVIDERS = {"browser-use": "BROWSER_USE_API_KEY", "browserbase": "BROWSERBASE_API_KEY", "firecrawl": "FIRECRAWL_API_KEY"}
-_IMAGE_GEN_PROVIDERS = {"fal": "FAL_KEY", "krea": "KREA_API_KEY", "openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY"}
+_IMAGE_GEN_PROVIDERS = {"fal": "FAL_KEY", "krea": "KREA_API_KEY", "openai": "OPENAI_API_KEY"}
 # Provider names Hermes' registries know — passed explicitly so vision/model routing
 # is deterministic (base_url auto-detection leaves provider='' for several of these).
-_HERMES_KNOWN_PROVIDERS = {"openai", "anthropic", "openrouter", "deepseek", "xai", "gemini", "openai-codex"}
+_HERMES_KNOWN_PROVIDERS = {"openai", "anthropic", "openrouter", "deepseek", "gemini", "openai-codex"}
 # Baked at image build; copied per-turn into HERMES_HOME so models.dev capability
 # lookups (supports_vision etc.) work offline — the ephemeral home is always cold.
 _MODELS_DEV_SNAPSHOT = os.environ.get("MODELS_DEV_SNAPSHOT", "/app/models_dev_snapshot.json")
@@ -141,7 +140,7 @@ def _materialize_home(req: dict) -> None:
         else:
             os.environ[_BROWSER_PROVIDERS[bprov]] = browser["api_key"]
         config_yaml += f"browser:\n  cloud_provider: {bprov}\n"
-    # Image generation — Hermes' bundled plugins (fal/krea/openai/xai).
+    # Image generation — Hermes' bundled plugins (fal/krea/openai).
     image_gen = req["config"].get("image_gen") or {}
     iprov = image_gen.get("provider") if image_gen.get("provider") in _IMAGE_GEN_PROVIDERS else "fal"
     if image_gen.get("api_key"):
