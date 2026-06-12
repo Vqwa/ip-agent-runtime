@@ -50,6 +50,10 @@ Hermes, they don't modify it:
 - **`max_iterations = 90`** — stock Hermes default (was 16).
 - **`web.backend`** in `config.yaml` — `oxylabs` when the request carries a BYOK
   key (injected as `OXYLABS_API_KEY`), else keyless `ddgs`. Name whitelisted.
+- **Cloud browser + image-gen (BYOK)** — `browser.cloud_provider: browser-use` +
+  `BROWSER_USE_API_KEY`, and `image_gen.provider: fal` + `FAL_KEY`, written only
+  when the request carries the agent's key. Hermes' own plugins, cloud mode (no
+  Chromium in the image), Hermes SSRF gating on cloud backends.
 - **Providers** — base-URL allowlist: openai, openrouter, anthropic, nexos
   (`api.nexos.ai/v1`), deepseek, xai, gemini (OpenAI-compat endpoint). Hermes
   picks the adapter from the host, so these are config entries, not code forks.

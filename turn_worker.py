@@ -59,6 +59,16 @@ def _materialize_home(req: dict) -> None:
     config_yaml += f"web:\n  backend: {backend}\n"
     if backend == "oxylabs" and web.get("api_key"):
         os.environ["OXYLABS_API_KEY"] = web["api_key"]
+    # Cloud browser (BYOK Browser Use key) — cloud mode, no local Chromium in the image.
+    browser = req["config"].get("browser") or {}
+    if browser.get("api_key"):
+        os.environ["BROWSER_USE_API_KEY"] = browser["api_key"]
+        config_yaml += "browser:\n  cloud_provider: browser-use\n"
+    # Image generation (BYOK FAL key) — Hermes' fal plugin.
+    image_gen = req["config"].get("image_gen") or {}
+    if image_gen.get("api_key"):
+        os.environ["FAL_KEY"] = image_gen["api_key"]
+        config_yaml += "image_gen:\n  provider: fal\n"
     with open(os.path.join(_HOME, "config.yaml"), "w") as f:
         f.write(config_yaml)
     mem = req.get("memory", {})
