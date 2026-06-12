@@ -44,6 +44,9 @@ _PROVIDER_BASE_URLS = {  # base_url is NOT free-form (PLAN §6); pin per provide
     "nvidia": "https://integrate.api.nvidia.com/v1",
     "huggingface": "https://router.huggingface.co/v1",
     "novita": "https://api.novita.ai/openai/v1",
+    # ChatGPT-subscription Codex backend (device-code OAuth). The api_key is the OAuth
+    # JWT; the codex transport derives the ChatGPT-Account-ID header from its claims.
+    "openai-codex": "https://chatgpt.com/backend-api/codex",
 }
 
 # Backend name -> the env var its Hermes provider reads (None = keyless). Names are
@@ -64,7 +67,7 @@ _BROWSER_PROVIDERS = {"browser-use": "BROWSER_USE_API_KEY", "browserbase": "BROW
 _IMAGE_GEN_PROVIDERS = {"fal": "FAL_KEY", "krea": "KREA_API_KEY", "openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY"}
 # Provider names Hermes' registries know — passed explicitly so vision/model routing
 # is deterministic (base_url auto-detection leaves provider='' for several of these).
-_HERMES_KNOWN_PROVIDERS = {"openai", "anthropic", "openrouter", "deepseek", "xai", "gemini"}
+_HERMES_KNOWN_PROVIDERS = {"openai", "anthropic", "openrouter", "deepseek", "xai", "gemini", "openai-codex"}
 # Baked at image build; copied per-turn into HERMES_HOME so models.dev capability
 # lookups (supports_vision etc.) work offline — the ephemeral home is always cold.
 _MODELS_DEV_SNAPSHOT = os.environ.get("MODELS_DEV_SNAPSHOT", "/app/models_dev_snapshot.json")
