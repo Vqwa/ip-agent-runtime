@@ -36,6 +36,14 @@ _PROVIDER_BASE_URLS = {  # base_url is NOT free-form (PLAN §6); pin per provide
     "deepseek": "https://api.deepseek.com/v1",
     "xai": "https://api.x.ai/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    # OpenAI-compatible providers (Hermes canonical set) — not in _HERMES_KNOWN_PROVIDERS,
+    # so provider is passed as None and Hermes auto-detects the OpenAI wire from base_url.
+    "alibaba": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "zai": "https://api.z.ai/api/paas/v4",
+    "moonshot": "https://api.moonshot.ai/v1",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+    "huggingface": "https://router.huggingface.co/v1",
+    "novita": "https://api.novita.ai/openai/v1",
 }
 
 # Backend name -> the env var its Hermes provider reads (None = keyless). Names are
@@ -115,6 +123,22 @@ def _materialize_home(req: dict) -> None:
     if image_gen.get("api_key"):
         os.environ[_IMAGE_GEN_PROVIDERS[iprov]] = image_gen["api_key"]
         config_yaml += f"image_gen:\n  provider: {iprov}\n"
+    # Optional DEDICATED VISION model (auxiliary.vision). Only used when the main model
+    # can't see images — multimodal main models attach images natively, no aux needed.
+    # The explicit base_url+api_key takes Hermes' direct-endpoint path (auxiliary_client
+    # _resolve_task_provider_model), bypassing its credential pool. SECURITY: the vision
+    # base_url is held to the SAME registry allow-list as the main model — an off-registry
+    # aux endpoint is a host-side credential/transcript exfil vector just like the main one.
+    vision = req["config"].get("vision_model") or {}
+    v_base = vision.get("base_url")
+    if vision.get("model") and vision.get("api_key") and v_base in set(_PROVIDER_BASE_URLS.values()):
+        config_yaml += (
+            "auxiliary:\n"
+            "  vision:\n"
+            f"    model: {json.dumps(vision['model'])}\n"
+            f"    base_url: {json.dumps(v_base)}\n"
+            f"    api_key: {json.dumps(vision['api_key'])}\n"
+        )
     with open(os.path.join(_HOME, "config.yaml"), "w") as f:
         f.write(config_yaml)
     mem = req.get("memory", {})
