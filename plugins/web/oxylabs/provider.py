@@ -94,9 +94,16 @@ class OxylabsWebSearchProvider(WebSearchProvider):
         if not key:
             return [{"url": u, "error": "OXYLABS_API_KEY is not set."} for u in urls]
 
+        # In-provider SSRF re-check (H41 defense in depth — the web_extract_tool
+        # dispatcher gate is the primary check; this holds if called directly).
+        from tools.url_safety import is_safe_url
+
         scraper = AiScraper(api_key=key)
         out: List[Dict[str, Any]] = []
         for url in urls:
+            if not is_safe_url(url):
+                out.append({"url": url, "error": "Blocked: URL targets a private or internal network address"})
+                continue
             try:
                 res = scraper.scrape(url=url, output_format="markdown", render_javascript="auto")
                 content = _scrape_content(res)

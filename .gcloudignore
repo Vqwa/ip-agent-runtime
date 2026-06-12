@@ -13,3 +13,4 @@ infographic
 locales
 nix
 packaging
+tests_runtime

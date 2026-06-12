@@ -28,10 +28,10 @@ spec:
         # max-instances 3. (No min-scale: scales to zero when idle.)
         autoscaling.knative.dev/maxScale: "3"
     spec:
-      # Least-privilege runtime SA. INVARIANT (DC-1): this SA must hold
-      # secretAccessor on ONLY jwt-public-key + e2b-api-key — never any
-      # per-tenant secret. Enforced by audit_iam.sh.
-      serviceAccountName: agent-runtime@ip-agent-runtime.iam.gserviceaccount.com
+      # Least-privilege runtime SA (HARDENING_PLAN H1, 2026-06-12): dedicated
+      # identity with ZERO project roles; per-secret secretAccessor on ONLY
+      # e2b-api-key. Never the Django/control-plane SA. Enforced by audit_iam.sh.
+      serviceAccountName: runtime-svc@ip-agent-runtime.iam.gserviceaccount.com
       # Concurrency 1: one turn per container, no co-tenant in a container.
       containerConcurrency: 1
       # Request deadline above the 300s agent wall-clock so the parent's graceful
@@ -47,12 +47,20 @@ spec:
               cpu: "1"
               memory: 1Gi
           env:
-            # Platform secrets mounted from Secret Manager (latest version).
+            # PUBLIC key as a plain value (H1 step 2): it was never a secret, and a
+            # mutable secret mount was a key-substitution vector. Rotation = edit here.
             - name: RUNTIME_JWT_PUBLIC_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: jwt-public-key
-                  key: latest
+              value: |
+                -----BEGIN PUBLIC KEY-----
+                MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAydSkm4+CUUhSR0meh8w6
+                jiz0mdGMQO/3sHR5CmTb344WLUdebIpwNBkKn5J1eauS0HyXy5iy37cp5LymnuHz
+                +UtiLObsTK1DpCRnXkTvscjT0vAUZkInsiXSBAA8ge0Epp8TMorjQnpPiMMwUSjF
+                1Rp3i+Bwa4n0sceJ7b2OngjCAiwRIfY3a0fmSJddVxZpPxIZlPzr9ZsFRXKlI7hc
+                MBIzd4RUAAmmu8sKXCNJMO+VqiEILY/ntRYkSwSW0K6wUUw/8Xbm2CqSiRq0jEvw
+                Q+b7N3OLMRzqesRjoiOoPv0S2ndSTPy9hSy4zG42IXkgCMdEtSwSRATPT7RRwWQl
+                uQIDAQAB
+                -----END PUBLIC KEY-----
+            # Platform secret mounted from Secret Manager (latest version).
             - name: E2B_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -61,3 +69,12 @@ spec:
             # Plain (non-secret) env.
             - name: E2B_TEMPLATE
               value: "6mumyphaqcu0ttayvgp1"
+            # H25: exact-match (after trailing-slash normalization) allowlist for the
+            # MCP endpoint a turn may carry; forwarded to the worker by server._child_env.
+            - name: RUNTIME_MCP_ENDPOINT_ALLOWLIST
+              value: "https://main.insightfulmcp.com/"
+            # Turn-JWT issuer/audience pins (set live during Phase-0 hardening).
+            - name: RUNTIME_JWT_ISS
+              value: "insightfulpipe"
+            - name: RUNTIME_JWT_AUD
+              value: "ip-agent-runtime"

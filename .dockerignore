@@ -114,3 +114,6 @@ acp_registry/
 
 # Top-level LICENSE (not matched by *.md); not needed inside the container
 LICENSE
+
+# Phase-3 hardening unit tests — run in CI (cloudbuild guard step), never shipped
+tests_runtime/
