@@ -35,6 +35,22 @@ _PROVIDER_BASE_URLS = {  # base_url is NOT free-form (PLAN §6); pin per provide
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
 }
 
+# Backend name -> the env var its Hermes provider reads (None = keyless). Names are
+# the providers' exact .name values; searxng's "key" is the instance URL.
+_WEB_BACKENDS = {
+    "ddgs": None,
+    "oxylabs": "OXYLABS_API_KEY",
+    "tavily": "TAVILY_API_KEY",
+    "exa": "EXA_API_KEY",
+    "firecrawl": "FIRECRAWL_API_KEY",
+    "parallel": "PARALLEL_API_KEY",
+    "brave-free": "BRAVE_SEARCH_API_KEY",
+    "searxng": "SEARXNG_URL",
+    "xai": "XAI_API_KEY",
+}
+_BROWSER_PROVIDERS = {"browser-use": "BROWSER_USE_API_KEY", "browserbase": "BROWSERBASE_API_KEY", "firecrawl": "FIRECRAWL_API_KEY"}
+_IMAGE_GEN_PROVIDERS = {"fal": "FAL_KEY", "krea": "KREA_API_KEY", "openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY"}
+
 
 def _materialize_home(req: dict) -> None:
     """Write config.yaml (MCP server + bearer) and memory files into HERMES_HOME."""
@@ -52,23 +68,34 @@ def _materialize_home(req: dict) -> None:
         )
     else:
         config_yaml = "mcp_servers: {}\n"
-    # Web backend: the agent's choice (BYOK key injected as OXYLABS_API_KEY), else
-    # keyless DuckDuckGo. Whitelist the name — it is interpolated into YAML.
+    # Backend menus mirror stock Hermes setup: names whitelisted (interpolated into
+    # YAML) and each provider's exact env key injected from the agent's BYOK value.
     web = req["config"].get("web") or {}
-    backend = web.get("backend") if web.get("backend") in {"ddgs", "oxylabs", "brave-free"} else "ddgs"
+    backend = web.get("backend") if web.get("backend") in _WEB_BACKENDS else "ddgs"
     config_yaml += f"web:\n  backend: {backend}\n"
-    if backend == "oxylabs" and web.get("api_key"):
-        os.environ["OXYLABS_API_KEY"] = web["api_key"]
-    # Cloud browser (BYOK Browser Use key) — cloud mode, no local Chromium in the image.
+    if web.get("api_key") and _WEB_BACKENDS.get(backend):
+        os.environ[_WEB_BACKENDS[backend]] = web["api_key"]
+    # Cloud browser — cloud mode, no local Chromium in the image. Browserbase packs
+    # {"api_key","project_id"} as JSON in api_key (both required by its provider).
     browser = req["config"].get("browser") or {}
+    bprov = browser.get("provider") if browser.get("provider") in _BROWSER_PROVIDERS else "browser-use"
     if browser.get("api_key"):
-        os.environ["BROWSER_USE_API_KEY"] = browser["api_key"]
-        config_yaml += "browser:\n  cloud_provider: browser-use\n"
-    # Image generation (BYOK FAL key) — Hermes' fal plugin.
+        if bprov == "browserbase":
+            try:
+                bb = json.loads(browser["api_key"])
+                os.environ["BROWSERBASE_API_KEY"] = bb.get("api_key", "")
+                os.environ["BROWSERBASE_PROJECT_ID"] = bb.get("project_id", "")
+            except ValueError:
+                os.environ["BROWSERBASE_API_KEY"] = browser["api_key"]
+        else:
+            os.environ[_BROWSER_PROVIDERS[bprov]] = browser["api_key"]
+        config_yaml += f"browser:\n  cloud_provider: {bprov}\n"
+    # Image generation — Hermes' bundled plugins (fal/krea/openai/xai).
     image_gen = req["config"].get("image_gen") or {}
+    iprov = image_gen.get("provider") if image_gen.get("provider") in _IMAGE_GEN_PROVIDERS else "fal"
     if image_gen.get("api_key"):
-        os.environ["FAL_KEY"] = image_gen["api_key"]
-        config_yaml += "image_gen:\n  provider: fal\n"
+        os.environ[_IMAGE_GEN_PROVIDERS[iprov]] = image_gen["api_key"]
+        config_yaml += f"image_gen:\n  provider: {iprov}\n"
     with open(os.path.join(_HOME, "config.yaml"), "w") as f:
         f.write(config_yaml)
     mem = req.get("memory", {})
