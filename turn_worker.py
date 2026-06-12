@@ -50,11 +50,26 @@ _WEB_BACKENDS = {
 }
 _BROWSER_PROVIDERS = {"browser-use": "BROWSER_USE_API_KEY", "browserbase": "BROWSERBASE_API_KEY", "firecrawl": "FIRECRAWL_API_KEY"}
 _IMAGE_GEN_PROVIDERS = {"fal": "FAL_KEY", "krea": "KREA_API_KEY", "openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY"}
+# Provider names Hermes' registries know — passed explicitly so vision/model routing
+# is deterministic (base_url auto-detection leaves provider='' for several of these).
+_HERMES_KNOWN_PROVIDERS = {"openai", "anthropic", "openrouter", "deepseek", "xai", "gemini"}
+# Baked at image build; copied per-turn into HERMES_HOME so models.dev capability
+# lookups (supports_vision etc.) work offline — the ephemeral home is always cold.
+_MODELS_DEV_SNAPSHOT = os.environ.get("MODELS_DEV_SNAPSHOT", "/app/models_dev_snapshot.json")
 
 
 def _materialize_home(req: dict) -> None:
     """Write config.yaml (MCP server + bearer) and memory files into HERMES_HOME."""
     os.makedirs(os.path.join(_HOME, "memories"), exist_ok=True)
+    # Seed the models.dev disk cache from the baked snapshot (stale-disk fallback
+    # keeps vision capability lookups working when the live fetch fails).
+    try:
+        if os.path.exists(_MODELS_DEV_SNAPSHOT):
+            import shutil
+
+            shutil.copyfile(_MODELS_DEV_SNAPSHOT, os.path.join(_HOME, "models_dev_cache.json"))
+    except OSError:
+        pass
     mcp = req["config"].get("mcp")
     if mcp and mcp.get("endpoint"):
         # One remote MCP server, bearer = the agent's read-only ip_sk_.
@@ -146,7 +161,9 @@ def run_turn(req: dict) -> dict:
     #   "code" -> "terminal" (code-exec, backed by the E2B sandbox)
     mcp_on = bool(req["config"].get("mcp", {}).get("endpoint"))
     toolsets: list[str] = []
-    for t in cfg.get("tools", ["memory", "clarify"]):
+    # No "clarify" default: there is no synchronous human in an async turn, so the
+    # tool can never resolve — advertising it just burns iterations.
+    for t in cfg.get("tools", ["memory"]):
         if t == "mcp":
             if mcp_on:
                 toolsets.append("insightfulpipe")
@@ -159,6 +176,7 @@ def run_turn(req: dict) -> dict:
         model=cfg["model"],
         api_key=llm["api_key"],
         base_url=base_url,
+        provider=provider if provider in _HERMES_KNOWN_PROVIDERS else None,
         enabled_toolsets=toolsets,
         max_iterations=int(limits.get("max_iterations", 90)),  # stock Hermes default (parity)
         ephemeral_system_prompt=session.get("system_prompt") or None,

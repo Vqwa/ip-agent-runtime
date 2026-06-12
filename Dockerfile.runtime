@@ -21,6 +21,10 @@ RUN pip install --no-cache-dir --timeout 120 --retries 10 -e . \
     && pip install --no-cache-dir --timeout 120 --retries 10 e2b mcp ddgs oxylabs-ai-studio \
         "fal-client==0.13.1" exa-py firecrawl-py parallel-web "pyjwt[crypto]" "uvicorn[standard]"
 
+# Bake a models.dev snapshot so capability lookups (supports_vision) work offline;
+# turn_worker seeds each ephemeral HERMES_HOME from it. Build fails if unfetchable.
+RUN python -c "import requests, pathlib; r = requests.get('https://models.dev/api.json', timeout=60); r.raise_for_status(); pathlib.Path('/app/models_dev_snapshot.json').write_bytes(r.content)"
+
 # Non-root.
 RUN useradd -m -u 10001 runtime && chown -R runtime:runtime /app
 USER runtime
