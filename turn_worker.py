@@ -73,6 +73,27 @@ _HERMES_KNOWN_PROVIDERS = {"openai", "anthropic", "openrouter", "deepseek", "xai
 _MODELS_DEV_SNAPSHOT = os.environ.get("MODELS_DEV_SNAPSHOT", "/app/models_dev_snapshot.json")
 
 
+def _scrub_platform_sandbox_keys() -> None:
+    """Defense-in-depth for BYOK (Modal/Daytona) turns: drop PLATFORM secrets from the
+    env so they can never reach the customer's own cloud sandbox. The worker env is
+    already allowlisted (server._child_env passes only the E2B platform keys + locale),
+    and the Modal/Daytona backends don't forward host env today — this guards against a
+    future Hermes version that does, and against the allowlist growing. None of these is
+    needed once code-exec runs on the customer's account."""
+    for k in (
+        "E2B_API_KEY",
+        "E2B_TEMPLATE",
+        "RUNTIME_JWT_PUBLIC_KEY",
+        "RUNTIME_JWT_PRIVATE_KEY",
+        "RUNTIME_EXTRA_BASE_URLS",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+        "GCP_SERVICE_ACCOUNT_KEY",
+        "GCLOUD_SERVICE_KEY",
+    ):
+        os.environ.pop(k, None)
+
+
 def _materialize_home(req: dict) -> None:
     """Write config.yaml (MCP server + bearer) and memory files into HERMES_HOME."""
     os.makedirs(os.path.join(_HOME, "memories"), exist_ok=True)
@@ -137,9 +158,11 @@ def _materialize_home(req: dict) -> None:
         os.environ["TERMINAL_MODAL_MODE"] = "direct"  # never the Nous-managed gateway
         os.environ["MODAL_TOKEN_ID"] = sandbox["token_id"]
         os.environ["MODAL_TOKEN_SECRET"] = sandbox["token_secret"]
+        _scrub_platform_sandbox_keys()
     elif sprov == "daytona" and sandbox.get("api_key"):
         os.environ["TERMINAL_ENV"] = "daytona"
         os.environ["DAYTONA_API_KEY"] = sandbox["api_key"]
+        _scrub_platform_sandbox_keys()
 
     # Optional DEDICATED VISION model (auxiliary.vision). Only used when the main model
     # can't see images — multimodal main models attach images natively, no aux needed.
