@@ -19,6 +19,9 @@ import time
 import uuid
 
 # --- 1) Environment, BEFORE any hermes import -------------------------------
+# In the FastAPI parent path HERMES_HOME is provided + rmtree'd by server.py. If we
+# create it (standalone/dev), we own cleanup — see main()'s finally.
+_PARENT_PROVIDED_HOME = bool(os.environ.get("HERMES_HOME"))
 _HOME = os.environ.get("HERMES_HOME") or tempfile.mkdtemp(prefix="turn-")
 os.environ["HERMES_HOME"] = _HOME
 os.environ.setdefault("HERMES_DISABLE_LAZY_INSTALLS", "1")  # no runtime pip
@@ -45,8 +48,9 @@ _WEB_BACKENDS = {
     "firecrawl": "FIRECRAWL_API_KEY",
     "parallel": "PARALLEL_API_KEY",
     "brave-free": "BRAVE_SEARCH_API_KEY",
-    "searxng": "SEARXNG_URL",
     "xai": "XAI_API_KEY",
+    # NOTE: searxng intentionally excluded — its "key" is an instance URL the worker
+    # would fetch host-side (SSRF to metadata/private IPs). All others auth via a key.
 }
 _BROWSER_PROVIDERS = {"browser-use": "BROWSER_USE_API_KEY", "browserbase": "BROWSERBASE_API_KEY", "firecrawl": "FIRECRAWL_API_KEY"}
 _IMAGE_GEN_PROVIDERS = {"fal": "FAL_KEY", "krea": "KREA_API_KEY", "openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY"}
@@ -228,6 +232,12 @@ def main() -> None:
     # Single final JSON line on stdout = the result channel (logs are on stderr).
     sys.stdout.write(json.dumps(resp) + "\n")
     sys.stdout.flush()
+    # If WE created the ephemeral home (standalone/dev), delete it — it holds the
+    # config.yaml with the MCP bearer. The parent path is cleaned by server.py.
+    if not _PARENT_PROVIDED_HOME:
+        import shutil
+
+        shutil.rmtree(_HOME, ignore_errors=True)
 
 
 if __name__ == "__main__":
