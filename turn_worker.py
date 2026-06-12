@@ -126,6 +126,21 @@ def _materialize_home(req: dict) -> None:
     if image_gen.get("api_key"):
         os.environ[_IMAGE_GEN_PROVIDERS[iprov]] = image_gen["api_key"]
         config_yaml += f"image_gen:\n  provider: {iprov}\n"
+    # Code-exec SANDBOX: platform E2B by default (module default TERMINAL_ENV=e2b +
+    # the platform key from the parent env). BYOK Modal/Daytona run on the CUSTOMER'S
+    # cloud account — their key, their bill, their isolation boundary. Provider names
+    # whitelisted; keys land only in this per-turn subprocess env.
+    sandbox = req["config"].get("sandbox") or {}
+    sprov = sandbox.get("provider")
+    if sprov == "modal" and sandbox.get("token_id") and sandbox.get("token_secret"):
+        os.environ["TERMINAL_ENV"] = "modal"
+        os.environ["TERMINAL_MODAL_MODE"] = "direct"  # never the Nous-managed gateway
+        os.environ["MODAL_TOKEN_ID"] = sandbox["token_id"]
+        os.environ["MODAL_TOKEN_SECRET"] = sandbox["token_secret"]
+    elif sprov == "daytona" and sandbox.get("api_key"):
+        os.environ["TERMINAL_ENV"] = "daytona"
+        os.environ["DAYTONA_API_KEY"] = sandbox["api_key"]
+
     # Optional DEDICATED VISION model (auxiliary.vision). Only used when the main model
     # can't see images — multimodal main models attach images natively, no aux needed.
     # The explicit base_url+api_key takes Hermes' direct-endpoint path (auxiliary_client
