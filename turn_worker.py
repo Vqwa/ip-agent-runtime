@@ -455,8 +455,9 @@ def run_turn(req: dict) -> dict:
         req["message"]["text"],
         conversation_history=session.get("history") or [],
         # Per-turn UNIQUE task_id: we carry conversation continuity ourselves (session_db=None;
-        # Django hydrates history), so the only effect of task_id is the code-exec sandbox name —
-        # a unique one per turn guarantees BYOK Modal/Daytona can't resume a prior turn's sandbox.
+        # Django hydrates history), so task_id only feeds the code-exec sandbox name. Ephemerality
+        # is GUARANTEED by TERMINAL_CONTAINER_PERSISTENT=false (set above); the unique id is
+        # defense-in-depth so a sandbox name can't collide/resume across turns.
         task_id=uuid.uuid4().hex,
     )
 
