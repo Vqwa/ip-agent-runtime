@@ -1,24 +1,59 @@
+# H013 supply chain: build -> invariant gate -> push -> SBOM -> cosign sign + SBOM attest.
+# Image deps are hash-pinned in the Dockerfile (requirements.lock, --require-hashes); this
+# pipeline adds provenance (a KMS-signed signature) + an SPDX SBOM attestation on the image.
+# NOTE: the syft + cosign images are distroless (no shell), so steps pass args directly and
+# sign/scan BY TAG (cosign + syft resolve the tag -> digest themselves; auth via the GCP
+# metadata server: the build SA holds cloudkms.signerVerifier on the cosign key).
+substitutions:
+  _IMAGE: europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime
+  _TAG: v10
+  _COSIGN_KEY: gcpkms://projects/ip-agent-runtime/locations/global/keyRings/hosted-agents/cryptoKeys/cosign-image-signer/cryptoKeyVersions/1
+  _COSIGN_VERSION: v2.4.3
+  _SYFT_VERSION: v1.18.1
 steps:
-  - name: gcr.io/cloud-builders/docker
-    args:
-      - build
-      - -f
-      - Dockerfile.runtime
-      - -t
-      - europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v10
-      - .
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "Dockerfile.runtime", "-t", "${_IMAGE}:${_TAG}", "."]
+
   # Runtime security-invariants gate (INV-RT-1 + Phase-3 gates): run ci_guard_runtime.py
-  # INSIDE the freshly built image (the toolset/preprocessor-inertness + gate-16 env
-  # checks need the real image). A non-zero exit fails the build BEFORE push, so a
-  # broken invariant can never be deployed. The live-GCP IAM audit (deploy/audit_iam.sh)
-  # is a SEPARATE post-deploy gate — it needs GCP creds a build step doesn't have.
-  - name: europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v10
+  # INSIDE the freshly built image. Non-zero exit fails the build BEFORE push.
+  - id: ci-guard
+    name: "${_IMAGE}:${_TAG}"
     entrypoint: python
+    args: ["/app/ci_guard_runtime.py"]
+    env: ["RUNTIME_JWT_PUBLIC_KEY=ci-placeholder"]
+
+  # Push so the tag is resolvable from the registry (cosign/syft pull by tag).
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "${_IMAGE}:${_TAG}"]
+
+  # SPDX SBOM of the pushed image (dependency visibility). syft is the entrypoint; no shell.
+  - id: sbom
+    name: anchore/syft:${_SYFT_VERSION}
+    args: ["registry:${_IMAGE}:${_TAG}", "-o", "spdx-json=/workspace/sbom.spdx.json"]
+
+  # Sign the image (provenance). cosign resolves the tag -> digest and signs the digest.
+  - id: sign
+    name: gcr.io/projectsigstore/cosign:${_COSIGN_VERSION}
+    args: ["sign", "--yes", "--key", "${_COSIGN_KEY}", "${_IMAGE}:${_TAG}"]
+
+  # Attach the SBOM as a signed attestation on the same image.
+  - id: attest
+    name: gcr.io/projectsigstore/cosign:${_COSIGN_VERSION}
     args:
-      - /app/ci_guard_runtime.py
-    env:
-      - "RUNTIME_JWT_PUBLIC_KEY=ci-placeholder"
-images:
-  - europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v10
+      - "attest"
+      - "--yes"
+      - "--key"
+      - "${_COSIGN_KEY}"
+      - "--type"
+      - "spdxjson"
+      - "--predicate"
+      - "/workspace/sbom.spdx.json"
+      - "${_IMAGE}:${_TAG}"
 options:
   machineType: E2_HIGHCPU_8
+artifacts:
+  objects:
+    location: gs://ip-agent-runtime_cloudbuild/sbom
+    paths: ["/workspace/sbom.spdx.json"]

@@ -6,11 +6,14 @@ node_modules
 ui-tui
 web
 website
-apps/desktop
+apps
 docs
 tests
 infographic
-locales
 nix
 packaging
 tests_runtime
+assets
+plans
+.plans
+acp_registry
