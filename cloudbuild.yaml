@@ -7,6 +7,17 @@ steps:
       - -t
       - europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v10
       - .
+  # Runtime security-invariants gate (INV-RT-1 + Phase-3 gates): run ci_guard_runtime.py
+  # INSIDE the freshly built image (the toolset/preprocessor-inertness + gate-16 env
+  # checks need the real image). A non-zero exit fails the build BEFORE push, so a
+  # broken invariant can never be deployed. The live-GCP IAM audit (deploy/audit_iam.sh)
+  # is a SEPARATE post-deploy gate — it needs GCP creds a build step doesn't have.
+  - name: europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v10
+    entrypoint: python
+    args:
+      - /app/ci_guard_runtime.py
+    env:
+      - "RUNTIME_JWT_PUBLIC_KEY=ci-placeholder"
 images:
   - europe-west1-docker.pkg.dev/ip-agent-runtime/runtime/ip-agent-runtime:v10
 options:

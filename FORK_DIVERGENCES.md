@@ -36,7 +36,7 @@ git diff --name-status origin/main
 | `tools/environments/e2b.py` | Call `self.init_session()` at end of `__init__` (guarded). | **Parity** with `docker.py`/`modal.py`: persist shell env/functions across terminal calls within a turn. Guarded → snapshot failure degrades to stateless, never breaks exec. |
 | `server.py` | `RUNTIME_MAX_WALL_SECONDS` default `150 → 300`. | Headroom for the stock 90-iteration budget so turns finish gracefully instead of hitting SIGKILL. |
 | `Dockerfile.runtime` | Runtime pip extras: `e2b`, `ddgs` (keyless web search), the web/image plugins, and the BYOK sandbox SDKs `modal==1.3.4` + `daytona==0.155.0`. | These ship in the image because Hermes leaves them as optional extras; our serving path needs them present. |
-| `deploy/service.yaml` | Image `:v3 → :v4`; add `timeoutSeconds: 360`. | Ship the parity build; request deadline above the 300s wall. |
+| `deploy/service.yaml` | Image pinned to `:v10` (in lockstep with `cloudbuild.yaml`); `timeoutSeconds: 360`. | Ship the current parity+hardening build; request deadline above the 300s wall. (Was `:v4` pre-Phase-3/4; bumped as hardening revisions shipped.) |
 | `.dockerignore` | Exclude `stub_llm.py`, `stub_mcp.py`. | Stop shipping test stubs (`stub_mcp` logs the inbound bearer to `/tmp`). |
 
 ## Runtime configuration the wrapper injects (not file forks)
@@ -45,8 +45,12 @@ These are set by `turn_worker.py` / Django per turn — they configure stock
 Hermes, they don't modify it:
 
 - **Toolset** (`enabled_toolsets`, the parity set): `insightfulpipe` (MCP, read-only),
-  `memory`, `clarify`, `terminal` (E2B), `file` (E2B-scoped), `todo`, `web`
-  (SSRF-gated), `vision` (SSRF-gated). All are upstream toolsets, unmodified.
+  `memory`, `terminal` (E2B), `file` (E2B-scoped), `todo`, `web` (SSRF-gated),
+  `vision` (SSRF-gated), plus `browser`/`image_gen` when the agent carries that BYOK
+  key. All are upstream toolsets, unmodified. **`clarify` is NOT shipped** — dropped
+  from the default (commit 6ec757e8, turn_worker maps logical `tools` with no clarify
+  branch) because it can never resolve in an async single-shot turn; advertising it
+  just burns iterations.
 - **`max_iterations = 90`** — stock Hermes default (was 16).
 - **`web.backend`** in `config.yaml` — `oxylabs` when the request carries a BYOK
   key (injected as `OXYLABS_API_KEY`), else keyless `ddgs`. Name whitelisted.
@@ -130,3 +134,42 @@ Regenerate the raw footprint any time with `git diff --name-status origin/main`.
 - `agent/prompt_builder.py` imports `get_environment` from `tools.environments`,
   which doesn't export it → the live in-sandbox env probe always falls back. Upstream
   bug; we mitigate only the cosmetic side (added the `e2b` fallback description).
+
+## Phase-3 hardening (2026-06-13, HARDENING_PLAN.md H12/H20-H27/H41 — IP-insightful-pipe-app repo)
+
+| File | Change | Why |
+|---|---|---|
+| `server.py` | H12: `iat` added to `options.require`; reject `exp - iat > 35` (401). | Bound a stolen turn-JWT's usable lifetime; Django signer already mints iat with ttl=30s — 35 = ttl + skew. |
+| `server.py` | H20: in-process jti replay guard — module dict `{jti: exp_epoch}` pruned each verify; re-seen unexpired jti → 401 `jti already used`; jti recorded only after all checks pass. | containerConcurrency=1 makes a plain dict safe (no lock). Residual: cross-instance replay stays IAM-bounded (H40). |
+| `server.py` | H21b (verify-IF-PRESENT): `mcp_token_sha256` claim compared (constant-time) to sha256 hex of `config.mcp.token` or `""`; mismatch → 401; absent → allowed + logged once per turn. `TODO(H21b-flip)` to require after Django PR #46 is live. | Binds the MCP bearer in the body to the signed turn JWT so a captured/forged body can't swap in another tenant's `ip_sk_`. |
+| `server.py` | H24 parent half: result channel is FRAMED — parse the ONE line after the LAST `===TURN_RESULT_v1===` sentinel line; no sentinel → 502 `child produced no framed result` (replaces the old last-stdout-line parse). | Library/tool noise or attacker-influenced JSON on stdout can no longer be read as the turn result. LOCKSTEP: worker half must emit the sentinel in the same image revision. |
+| `server.py` | H23 parent half: stderr scrubbed BY VALUE before the shape regex — `_collect_secret_values()` recursively harvests every string under `*key`/`*token`/`*secret`-named keys in the request body + parent-env `E2B_API_KEY` (len≥8), replaced longest-first with `[REDACTED]`; regex stays as layer 2. | Covers both secret populations: request-borne keys with no recognizable prefix (e.g. Oxylabs) AND the parent-env-injected E2B key the request-only set would miss. |
+| `tests_runtime/test_server_hardening.py` | Cluster S unit tests for H12/H20/H21b/H23/H24 parent logic (RSA keypair via cryptography; imports server.py only — no subprocess, no Hermes). Not shipped in the image. | — |
+| `turn_worker.py` | H24 (worker half): result framed — `===TURN_RESULT_v1===` sentinel line + ONE JSON line as the FINAL stdout write (success + structured-error paths); a leading newline closes any unterminated stray stdout so the sentinel is always its own line. | Parent extracts by the LAST sentinel line; stray Hermes stdout can no longer corrupt or spoof the result channel. |
+| `turn_worker.py` | H25: `config.mcp.endpoint` pinned to env `RUNTIME_MCP_ENDPOINT_ALLOWLIST` (comma-separated, default `https://main.insightfulmcp.com/`), exact match after trailing-slash normalization; an off-allowlist endpoint refuses the turn with `error.type=mcp_endpoint_refused` BEFORE config.yaml is written. | The agent's read-only `ip_sk_` MCP bearer must never travel to a body-supplied URL. |
+| `turn_worker.py` | H22 (containment): every BYOK env injection goes through `_inject_env` (recorded in `_INJECTED_ENV`) and is deleted in `main()`'s finally the moment the run ends; `_assert_sandbox_env_contained()` refuses the turn pre-agent-start (`error.type=env_key_leak`, names only) if an unrecorded `*_API_KEY`/`*_KEY`/`*_TOKEN*`/`*_SECRET`/`MODAL_*`/`DAYTONA_*` var is present — platform path allows exactly `E2B_API_KEY`, BYOK Modal/Daytona path requires it scrubbed. | Hermes plugins read BYOK keys via `os.getenv` at call time (plugins/web/*, tools/), so construction-time injection would fork upstream files; E2B builds the sandbox remotely with NO host-env forwarding (`tools/environments/e2b.py`), leaving this worker's env as the only key residence. Residual: `/proc/<worker pid>/environ` shows the keys WHILE the turn runs. |
+| `turn_worker.py` | H23 (worker half): `error.message` and the worker's stderr error line scrubbed BY VALUE — `_collect_secret_values()` recursively pulls every string under a secret-shaped key at any nesting depth (incl. JSON packed inside browserbase `api_key`), unioned with parent-env platform secrets snapshotted at import (`E2B_API_KEY` today, pre-`_scrub_platform_sandbox_keys`). | Structured errors can quote BOTH secret populations (request-borne + parent-env); pattern-only scrubbing misses arbitrary key shapes. |
+| `turn_worker.py` | H26: config.yaml created `0o600` via `os.open(..., 0o600)` — the only on-disk file holding the MCP bearer. | Owner-only from the first byte; no chmod race window. |
+| `tests_runtime/test_worker_hardening.py` | New worker-cluster test module (stdlib-only; never imports `run_agent` — exercises pure helpers + the pre-import refusal paths of `run_turn()`/`main()`). | Regression gates for the H22/H23/H24/H25/H26 worker halves. |
+| `tools/environments/e2b.py` | H27: record live sandbox id in `$HERMES_HOME/.sandbox_id` (one per line) on create; unrecord only on confirmed kill; module-level `kill_sandbox(sandbox_id)` reaper; `sandbox_lifetime` clamped to `MAX_SANDBOX_LIFETIME=300`. | A wall-clock SIGKILL of the worker orphaned the microVM until lifetime expiry; the parent reaps via the breadcrumb, and an unreaped orphan now self-expires within one turn budget. |
+| `plugins/web/oxylabs/provider.py` | H41: per-URL `is_safe_url` re-check inside `extract()` — blocked URLs become error rows and never reach AI-Scraper. | Defense in depth: `web_extract_tool`'s dispatcher gate (web_tools.py:967) is the primary SSRF check; the fork-owned provider now holds even if invoked directly. |
+| `ci_guard_runtime.py` | Gates 4–6: gate-16 spawn-shape check (`server._child_env()` carries no secret-shaped key beyond the `E2B_API_KEY` passthrough), `tools/url_safety` metadata-floor regression pin (169.254.169.254 + metadata.google.internal), and H24 framing-sentinel identity check across `server.py`/`turn_worker.py` (text-level). | Makes the spawn-boundary, SSRF-floor, and result-framing promises self-enforcing in CI. |
+| `tests_runtime/test_env_hardening.py` | New (cluster E): unit tests for the H27 reaper/breadcrumb/lifetime clamp and the H41 oxylabs gate; SDK surfaces stubbed via sys.modules, no network, stdlib-only imports. | Falsifiable DONE gates for the fork-side H27/H41 changes. |
+| `server.py` | H27 parent half: `finally` reads `$HERMES_HOME/.sandbox_id` and best-effort `kill_sandbox()`s each id before `_rmtree` (normal turns unrecord theirs — orphans only). | A SIGKILLed worker cannot run its own sandbox cleanup; the 300s lifetime clamp is the backstop. |
+
+## Phase-4 hardening (2026-06-13, HARDENING_PLAN.md H29–H31/H34/H35 + H38a — runtime half)
+
+The KMS signing (H29), key rotation (H30), CMEK (H31), abuse caps (H34) and webhook-role
+split (H35) are mostly Django-side (PR #48). The runtime fork carries only the H30 verifier
+half + the extended IAM audit:
+
+| File | Change | Why |
+|---|---|---|
+| `server.py` | H30 kid-keyed verifier: `_parse_public_keys_json(RUNTIME_JWT_PUBLIC_KEYS_JSON)` builds a `{kid: PEM}` set; `_verify_jwt` selects the PEM by the token's `kid` header (kid-less → the single `RUNTIME_JWT_PUBLIC_KEY`; unknown kid → 401). | The KMS signer (Django `sign_turn_jwt_kms`) stamps `kid` = the KMS key-version resource, so rotation is add-PEM → switch signer → drop old without a lockstep image rebuild. Malformed env JSON fails at import (deploy), never per-turn. |
+| `deploy/audit_iam.sh` | H38a: invoker set asserted == exactly `agent-control@` (not the old gmail); runtime SA `secretAccessor` == exactly `{e2b-api-key}`; auditConfigs now also require `cloudkms.googleapis.com DATA_READ` (H5 extended for the H29 KMS signer). | Makes the Phase-0 identity split + KMS audit-log promise self-enforcing as a deploy-blocking C9 gate. |
+| `tests_runtime/test_server_kid.py` | Unit tests for the H30 kid selection paths (RSA keypairs via cryptography; imports `server.py` only). | Falsifiable gate for the kid verifier. Not shipped in the image. |
+
+**Residual (H40):** with no Render OIDC/WIF (H6), KMS removes key *persistence* + adds
+revocation/audit but a static-key holder can still CALL KMS to sign — it does not remove the
+signing capability from a key thief. CMEK (H31) only protects new secret versions, which is why
+H31 mandates rotating every live version. Both stated in HARDENING_PLAN, not implied away here.

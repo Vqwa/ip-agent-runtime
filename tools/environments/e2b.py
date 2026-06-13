@@ -17,11 +17,66 @@ tools/terminal_tool.py:_create_environment). Requires the ``e2b`` package
 """
 
 import logging
+import os
 import shlex
 
 from tools.environments.base import BaseEnvironment, _ThreadedProcessHandle
 
 logger = logging.getLogger(__name__)
+
+# H27 orphan-reaper contract: every live sandbox id is recorded (one per line) in
+# $HERMES_HOME/.sandbox_id so the parent can reap after a wall-clock SIGKILL.
+SANDBOX_ID_FILENAME = ".sandbox_id"
+# Cap on sandbox lifetime: never outlive the runtime wall budget
+# (RUNTIME_MAX_WALL_SECONDS=300) — an unreaped orphan must self-expire within it.
+MAX_SANDBOX_LIFETIME = int(os.environ.get("RUNTIME_MAX_WALL_SECONDS", "300"))  # lockstep with server.py wall budget
+
+
+def _sandbox_id_path() -> str | None:
+    home = os.environ.get("HERMES_HOME")
+    return os.path.join(home, SANDBOX_ID_FILENAME) if home else None
+
+
+def _record_sandbox_id(sandbox_id: str) -> None:
+    path = _sandbox_id_path()
+    if not path or not sandbox_id:
+        return
+    try:
+        with open(path, "a") as f:
+            f.write(sandbox_id + "\n")
+    except OSError as e:
+        logger.warning("E2B: could not record sandbox id %s: %s", sandbox_id, e)
+
+
+def _unrecord_sandbox_id(sandbox_id: str) -> None:
+    path = _sandbox_id_path()
+    if not path or not sandbox_id:
+        return
+    try:
+        with open(path) as f:
+            remaining = [ln for ln in f.read().splitlines() if ln and ln != sandbox_id]
+        if remaining:
+            with open(path, "w") as f:
+                f.write("\n".join(remaining) + "\n")
+        else:
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def kill_sandbox(sandbox_id: str) -> bool:
+    """Reap a sandbox by id (parent-side orphan hook). Safe on dead/unknown ids."""
+    if not sandbox_id:
+        return False
+    try:
+        from e2b import Sandbox
+
+        Sandbox.kill(sandbox_id)
+        logger.info("E2B: reaped sandbox %s", sandbox_id)
+        return True
+    except Exception as e:
+        logger.warning("E2B: reap of sandbox %s failed: %s", sandbox_id, e)
+        return False
 
 
 class E2BEnvironment(BaseEnvironment):
@@ -48,9 +103,10 @@ class E2BEnvironment(BaseEnvironment):
         template: str | None = None,
     ):
         super().__init__(cwd=cwd, timeout=timeout)
-        import os as _os
 
-        template = template or _os.environ.get("E2B_TEMPLATE") or None
+        template = template or os.environ.get("E2B_TEMPLATE") or None
+        # H27: clamp to the wall budget so a SIGKILL-orphaned microVM self-expires.
+        sandbox_lifetime = min(sandbox_lifetime, MAX_SANDBOX_LIFETIME)
 
         try:
             from tools.lazy_deps import ensure as _lazy_ensure
@@ -69,10 +125,13 @@ class E2BEnvironment(BaseEnvironment):
         if template:
             create_kwargs["template"] = template
         self._sandbox = Sandbox.create(**create_kwargs)
+        # H27: breadcrumb for the parent reaper, written the moment the VM exists.
+        self._sandbox_id = getattr(self._sandbox, "sandbox_id", "") or ""
+        _record_sandbox_id(self._sandbox_id)
         self._allow_internet = allow_internet_access
         logger.info(
             "E2B: created sandbox %s (egress=%s)",
-            getattr(self._sandbox, "sandbox_id", "?"),
+            self._sandbox_id or "?",
             "on" if allow_internet_access else "OFF",
         )
         # Parity with docker.py/modal.py: snapshot the login shell so env vars and
@@ -120,6 +179,9 @@ class E2BEnvironment(BaseEnvironment):
             return
         try:
             self._sandbox.kill()
+            # Kill confirmed — drop the reaper breadcrumb; on failure it stays
+            # recorded so the parent-side kill_sandbox() hook can retry.
+            _unrecord_sandbox_id(getattr(self, "_sandbox_id", ""))
             logger.info("E2B: killed sandbox")
         except Exception as e:
             logger.warning("E2B: cleanup failed: %s", e)
