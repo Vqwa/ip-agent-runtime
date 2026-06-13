@@ -16,11 +16,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Source (TS/desktop/docs/tests excluded via .dockerignore).
 COPY . /app
 
-# Hermes core + runtime extras: E2B sandbox backend, MCP client, JWT, server.
-RUN pip install --no-cache-dir --timeout 120 --retries 10 -e . \
-    && pip install --no-cache-dir --timeout 120 --retries 10 e2b mcp ddgs oxylabs-ai-studio \
-        "fal-client==0.13.1" exa-py firecrawl-py parallel-web "pyjwt[crypto]" "uvicorn[standard]" \
-        "modal==1.3.4" "daytona==0.155.0"
+# H013 supply chain: every third-party dep is hash-pinned (requirements.lock,
+# regenerate with `uv pip compile pyproject.toml requirements-runtime-extras.in
+# --generate-hashes -o requirements.lock`). --require-hashes refuses any artifact
+# whose download hash doesn't match — a compromised mirror serving a tampered wheel
+# fails the build. The local package installs --no-deps (deps already locked above).
+RUN pip install --no-cache-dir --timeout 120 --retries 10 --require-hashes -r requirements.lock \
+    && pip install --no-cache-dir --timeout 120 --retries 10 --no-deps --no-build-isolation -e .
 
 # Bake a models.dev snapshot so capability lookups (supports_vision) work offline;
 # turn_worker seeds each ephemeral HERMES_HOME from it. Build fails if unfetchable.
