@@ -198,3 +198,11 @@ deploy/cosign.pub` confirms "signatures were verified against the specified publ
 mandatory even for an out-of-band `gcloud run deploy` — is documented as the next hardening step
 inside `verify_signature.sh` (dry-run soak first; a misconfigured enforced policy can wedge all
 deploys). Stated, not implied away.
+
+**013 follow-up (2026-06-13, security review):** `deploy/verify_signature.sh` now **pins to the
+immutable digest** — it resolves the tag→`@sha256:` once, verifies THAT digest, and prints it on
+stdout for the deploy to use verbatim (`gcloud run deploy --image "$(verify_signature.sh …)"`).
+Closes the mutable-tag race a security review flagged: an Artifact-Registry-write principal could
+otherwise retag `:v10` between verify and Cloud Run's own resolve. The signed bytes and the deployed
+bytes are now guaranteed identical for the scripted path; Binary Authorization remains the
+all-paths platform enforcement.
