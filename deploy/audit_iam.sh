@@ -1,42 +1,41 @@
 #!/usr/bin/env bash
-# Deploy-blocking IAM/isolation audit for the Hosted Agents runtime (DC-1).
+# Deploy-blocking IAM/isolation audit for the Hosted Agents runtime (DC-1 + C9 / H38(a)).
 #
 # Asserts the load-bearing isolation invariants that a Knative manifest cannot
 # carry. Exits non-zero on ANY violation so CI blocks the deploy.
 #
 #   (a) run.invoker policy contains NEITHER allUsers NOR allAuthenticatedUsers.
-#   (b) run.invoker members are only EXPECTED_INVOKER (+ optional EXPECTED_TEST_INVOKER).
-#   (c) the agent-runtime SA's secretAccessor bindings are EXACTLY
-#       {jwt-public-key, e2b-api-key} and on NO other secret.
+#   (b) run.invoker members are EXACTLY agent-control@ (+ optional EXPECTED_TEST_INVOKER).
+#   (c) the runtime SA's secretAccessor bindings are EXACTLY {e2b-api-key}
+#       and on NO other secret (post-H1 the JWT public key is plain env, not a secret).
 #   (d) the service is --no-allow-unauthenticated in effect (IAM policy is private).
+#   (e) the service's serviceAccountName is the dedicated runtime SA (H1).
+#   (f) the runtime SA holds ZERO project-level role bindings (H1).
+#   (g) the legacy project-admin SA agent-runtime@ no longer exists (H2).
+#   (h) project auditConfigs cover secretmanager DATA_READ+DATA_WRITE and
+#       cloudkms DATA_READ (H5, extended for H29).
 #
-# Usage:
-#   EXPECTED_INVOKER=serviceAccount:django-dispatch@<proj>.iam.gserviceaccount.com \
-#     deploy/audit_iam.sh
+# Usage: deploy/audit_iam.sh   (defaults match the live project; envs override)
 set -euo pipefail
 
 PROJECT="${PROJECT:-ip-agent-runtime}"
 REGION="${REGION:-europe-west1}"
 SERVICE="${SERVICE:-ip-agent-runtime}"
-RUNTIME_SA="${RUNTIME_SA:-agent-runtime@ip-agent-runtime.iam.gserviceaccount.com}"
+RUNTIME_SA="${RUNTIME_SA:-runtime-svc@${PROJECT}.iam.gserviceaccount.com}"
+# The pre-H1 project-admin identity — must stay deleted (H2).
+LEGACY_SA="${LEGACY_SA:-agent-runtime@${PROJECT}.iam.gserviceaccount.com}"
 
-# The Django dispatch SA that is allowed to invoke. Not yet created — must be
-# passed in (e.g. serviceAccount:django-dispatch@<proj>.iam.gserviceaccount.com).
-EXPECTED_INVOKER="${EXPECTED_INVOKER:-}"
+# The control-plane (Django) SA — the ONLY principal allowed to invoke (H3).
+EXPECTED_INVOKER="${EXPECTED_INVOKER:-serviceAccount:agent-control@${PROJECT}.iam.gserviceaccount.com}"
 # Optional CI/integration-test SA also permitted to invoke.
 EXPECTED_TEST_INVOKER="${EXPECTED_TEST_INVOKER:-}"
 
-# The ONLY secrets the runtime SA may read.
-ALLOWED_SECRETS=("jwt-public-key" "e2b-api-key")
+# The ONLY secret the runtime SA may read (post-H1).
+ALLOWED_SECRETS=("e2b-api-key")
 
 GCLOUD_COMMON=(--project="$PROJECT")
 fail=0
 note() { printf '  - %s\n' "$1"; }
-
-if [[ -z "$EXPECTED_INVOKER" ]]; then
-  echo "FATAL: set EXPECTED_INVOKER (e.g. serviceAccount:django-dispatch@${PROJECT}.iam.gserviceaccount.com)" >&2
-  exit 2
-fi
 
 echo "== Hosted Agents runtime IAM audit =="
 echo "project=$PROJECT region=$REGION service=$SERVICE"
@@ -92,7 +91,7 @@ fi
   echo "    OK: invoker set == {$(tr '\n' ' ' <<<"$expected_members")}"
 
 # ----------------------------------------------------------------------------
-# (c) Runtime SA secretAccessor must be EXACTLY {jwt-public-key, e2b-api-key}.
+# (c) Runtime SA secretAccessor must be EXACTLY {e2b-api-key} (post-H1).
 #     Walk every secret in the project; flag any extra grant and any missing one.
 # ----------------------------------------------------------------------------
 echo "[c] runtime SA secretAccessor == {${ALLOWED_SECRETS[*]}} and no other secret"
@@ -125,6 +124,69 @@ for want in "${ALLOWED_SECRETS[@]}"; do
   fi
 done
 echo "    granted: ${granted[*]:-<none>}"
+
+# ----------------------------------------------------------------------------
+# (e) The service must run as the dedicated runtime SA (H1).
+# ----------------------------------------------------------------------------
+echo "[e] service serviceAccountName == $RUNTIME_SA"
+service_sa="$(gcloud run services describe "$SERVICE" --region="$REGION" "${GCLOUD_COMMON[@]}" \
+  --format='value(spec.template.spec.serviceAccountName)')"
+if [[ "$service_sa" != "$RUNTIME_SA" ]]; then
+  note "serviceAccountName is '${service_sa:-<empty>}' — expected $RUNTIME_SA"
+  fail=1
+else
+  echo "    OK: service runs as $RUNTIME_SA"
+fi
+
+# ----------------------------------------------------------------------------
+# (f) + (h) need the project IAM policy (includes auditConfigs); fetch once.
+# ----------------------------------------------------------------------------
+project_policy="$(gcloud projects get-iam-policy "$PROJECT" --format=json)"
+
+# (f) The runtime SA must hold ZERO project-level role bindings (H1).
+echo "[f] runtime SA has no project-level role bindings"
+runtime_roles="$(jq -r --arg m "serviceAccount:${RUNTIME_SA}" \
+  '.bindings // [] | map(select(.members | index($m))) | .[].role' \
+  <<<"$project_policy" | sort -u)"
+if [[ -n "$runtime_roles" ]]; then
+  note "runtime SA holds PROJECT-level role(s): $(tr '\n' ' ' <<<"$runtime_roles")"
+  fail=1
+else
+  echo "    OK: zero project bindings for $RUNTIME_SA"
+fi
+
+# ----------------------------------------------------------------------------
+# (g) The legacy project-admin SA must stay deleted (H2).
+# ----------------------------------------------------------------------------
+echo "[g] legacy SA $LEGACY_SA does not exist"
+if gcloud iam service-accounts describe "$LEGACY_SA" "${GCLOUD_COMMON[@]}" >/dev/null 2>&1; then
+  note "legacy SA STILL EXISTS: $LEGACY_SA — H2 teardown incomplete"
+  fail=1
+else
+  echo "    OK: $LEGACY_SA is gone"
+fi
+
+# ----------------------------------------------------------------------------
+# (h) Data Access audit logs (H5; cloudkms added for H29's KMS signer).
+# ----------------------------------------------------------------------------
+echo "[h] auditConfigs: secretmanager DATA_READ+DATA_WRITE, cloudkms DATA_READ"
+audit_has() {  # $1=service $2=logType — allServices coverage counts too
+  jq -e --arg svc "$1" --arg lt "$2" \
+    '.auditConfigs // [] | map(select(.service==$svc or .service=="allServices"))
+       | map(.auditLogConfigs // [] | map(.logType)) | flatten | index($lt)' \
+    <<<"$project_policy" >/dev/null
+}
+for want in "secretmanager.googleapis.com DATA_READ" \
+            "secretmanager.googleapis.com DATA_WRITE" \
+            "cloudkms.googleapis.com DATA_READ"; do
+  svc="${want% *}" lt="${want#* }"
+  if audit_has "$svc" "$lt"; then
+    echo "    OK: $svc $lt"
+  else
+    note "auditConfigs MISSING $lt for $svc"
+    fail=1
+  fi
+done
 
 # ----------------------------------------------------------------------------
 # Summary.

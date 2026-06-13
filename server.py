@@ -1,6 +1,6 @@
 """FastAPI parent for the InsightfulPipe Hosted Agents runtime.
 
-Verifies the per-turn RS256 JWT (baked-in PUBLIC key only), then runs the turn
+Verifies the per-turn RS256 JWT (baked-in PUBLIC keys only, kid-selected), then runs the turn
 in a FRESH SUBPROCESS per request with:
   * a unique ephemeral HERMES_HOME set BEFORE the child interpreter starts,
   * a MINIMAL env (NO tenant secrets — those go to the child via stdin only),
@@ -27,9 +27,25 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 app = FastAPI()
 
+
+def _parse_public_keys_json(raw: str) -> dict[str, str]:
+    """H30: optional {kid: PEM} verifier set; malformed env kills the import (deploy fails), not turns."""
+    if not raw:
+        return {}
+    keys = json.loads(raw)  # bad JSON raises here, at import — fail fast
+    if not isinstance(keys, dict) or not all(
+        isinstance(k, str) and k and isinstance(v, str) and v for k, v in keys.items()
+    ):
+        raise ValueError("RUNTIME_JWT_PUBLIC_KEYS_JSON must be a JSON object of {kid: PEM}")
+    return keys
+
+
 # --- config (baked into the image / runtime env; NOT per-tenant) -------------
 WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "turn_worker.py")
 JWT_PUBLIC_KEY = os.environ["RUNTIME_JWT_PUBLIC_KEY"]  # PEM; baked in, never a network JWKS
+# H30 kid-keyed set. Rotation: add the new {kid: PEM} entry -> deploy -> switch the Django
+# signer's kid -> drop the old entry next deploy. kid-less tokens use RUNTIME_JWT_PUBLIC_KEY.
+JWT_PUBLIC_KEYS = _parse_public_keys_json(os.environ.get("RUNTIME_JWT_PUBLIC_KEYS_JSON", ""))
 JWT_ISS = os.environ.get("RUNTIME_JWT_ISS", "insightfulpipe")
 JWT_AUD = os.environ.get("RUNTIME_JWT_AUD", "ip-agent-runtime")
 MAX_WALL_SECONDS = int(os.environ.get("RUNTIME_MAX_WALL_SECONDS", "300"))
@@ -51,9 +67,20 @@ def _verify_jwt(authorization: str, body: dict) -> None:
         raise HTTPException(401, "missing bearer token")
     token = authorization[len("Bearer "):]
     try:
+        kid = jwt.get_unverified_header(token).get("kid")
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(401, f"invalid token: {e}")
+    # H30: a kid selects its PEM from the set; no kid = the single env key (legacy signer).
+    if kid is None:
+        public_key = JWT_PUBLIC_KEY
+    elif isinstance(kid, str) and kid in JWT_PUBLIC_KEYS:
+        public_key = JWT_PUBLIC_KEYS[kid]
+    else:
+        raise HTTPException(401, "unknown kid")
+    try:
         claims = jwt.decode(
             token,
-            JWT_PUBLIC_KEY,
+            public_key,
             algorithms=["RS256"],            # reject alg=none / HMAC
             audience=JWT_AUD,
             issuer=JWT_ISS,

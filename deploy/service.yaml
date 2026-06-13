@@ -60,6 +60,12 @@ spec:
                 Q+b7N3OLMRzqesRjoiOoPv0S2ndSTPy9hSy4zG42IXkgCMdEtSwSRATPT7RRwWQl
                 uQIDAQAB
                 -----END PUBLIC KEY-----
+            # H30 kid-keyed verifier SET (JSON object {kid: PEM}), selected by the JWT
+            # header kid; kid-less tokens keep using RUNTIME_JWT_PUBLIC_KEY. When H29
+            # flips to KMS signing, put the KMS key VERSION 1 public key PEM here, keyed
+            # by its cryptoKeyVersions resource name (the kid the Django signer stamps).
+            # - name: RUNTIME_JWT_PUBLIC_KEYS_JSON
+            #   value: '{"projects/ip-agent-runtime/locations/global/keyRings/hosted-agents/cryptoKeys/turn-jwt-signer/cryptoKeyVersions/1": "-----BEGIN PUBLIC KEY-----\n<KMS-V1-PEM>\n-----END PUBLIC KEY-----\n"}'
             # Platform secret mounted from Secret Manager (latest version).
             - name: E2B_API_KEY
               valueFrom:
