@@ -12,7 +12,9 @@ The FastAPI parent normally sets HERMES_HOME before spawning this process; we
 create a fresh ephemeral one if unset so the worker is runnable standalone.
 """
 
+import base64
 import json
+import mimetypes
 import os
 import re
 import sys
@@ -322,6 +324,57 @@ def _join_background_review() -> None:
             t.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
+# Artifact collection (divergence #4): files the turn generated live under HERMES_HOME and are
+# rmtree'd right after; collect the MEDIA:<path>-marked ones (image_gen / screenshots / MCP media)
+# so Django can upload + deliver them. Caps keep the base64 well under the server stdout budget;
+# larger artifacts are skipped (a runtime-direct-upload path is the documented follow-up).
+_MEDIA_RE = re.compile(r"MEDIA:(\S+)")
+_MAX_ARTIFACT_BYTES = 2 * 1024 * 1024  # 2 MiB/file
+_MAX_ARTIFACTS_TOTAL_BYTES = 4 * 1024 * 1024  # 4 MiB total (raw), safely under the 8 MiB stdout cap
+_MAX_ARTIFACTS = 6
+
+
+def _collect_artifacts(result: dict) -> list:
+    """Read MEDIA:<path> files the turn produced (final response + tool results) for delivery.
+    PATH-CONFINED to HERMES_HOME so an attacker-influenced marker can't exfil arbitrary host
+    files; bounded per-file and in aggregate. Returns [{marker, filename, content_type, b64}]."""
+    texts = [str(result.get("final_response") or "")]
+    for m in result.get("messages") or []:
+        if isinstance(m, dict) and isinstance(m.get("content"), str):
+            texts.append(m["content"])
+    home = os.path.realpath(_HOME)
+    seen: set[str] = set()
+    artifacts: list = []
+    total = 0
+    for blob in texts:
+        for path in _MEDIA_RE.findall(blob):
+            if path in seen or len(artifacts) >= _MAX_ARTIFACTS:
+                continue
+            seen.add(path)
+            real = os.path.realpath(path)
+            # Only files genuinely under HERMES_HOME — never follow a marker to a host path.
+            if not (real == home or real.startswith(home + os.sep)) or not os.path.isfile(real):
+                continue
+            try:
+                size = os.path.getsize(real)
+                if size > _MAX_ARTIFACT_BYTES or total + size > _MAX_ARTIFACTS_TOTAL_BYTES:
+                    continue
+                with open(real, "rb") as f:
+                    data = f.read()
+            except OSError:
+                continue
+            total += len(data)
+            artifacts.append(
+                {
+                    "marker": f"MEDIA:{path}",
+                    "filename": os.path.basename(real),
+                    "content_type": mimetypes.guess_type(real)[0] or "application/octet-stream",
+                    "b64": base64.b64encode(data).decode(),
+                }
+            )
+    return artifacts
+
+
 def _read_memory() -> dict:
     def _r(name):
         try:
@@ -410,6 +463,7 @@ def run_turn(req: dict) -> dict:
         "reply_text": result.get("final_response", ""),
         "messages": result.get("messages", []),
         "memory": _read_memory(),
+        "artifacts": _collect_artifacts(result),  # divergence #4 — collected before HERMES_HOME is rmtree'd
         "usage": {
             "input_tokens": result.get("input_tokens", 0),
             "output_tokens": result.get("output_tokens", 0),

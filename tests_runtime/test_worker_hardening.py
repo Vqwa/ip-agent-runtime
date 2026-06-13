@@ -307,3 +307,30 @@ class BackgroundReviewJoinTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CollectArtifactsTests(unittest.TestCase):
+    """divergence #4: _collect_artifacts reads MEDIA:<path> files but is path-confined to
+    HERMES_HOME (a marker can never exfil an arbitrary host file)."""
+
+    def test_reads_media_file_under_home(self):
+        import base64
+
+        path = os.path.join(turn_worker._HOME, "cache_shot.png")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"PNGBYTES")
+        result = {"final_response": f"see MEDIA:{path}", "messages": []}
+        arts = turn_worker._collect_artifacts(result)
+        self.assertEqual(len(arts), 1)
+        self.assertEqual(base64.b64decode(arts[0]["b64"]), b"PNGBYTES")
+        self.assertEqual(arts[0]["marker"], f"MEDIA:{path}")
+
+    def test_refuses_path_outside_home(self):
+        # A marker pointing at a host file (e.g. /etc/passwd) must NOT be read.
+        result = {"final_response": "MEDIA:/etc/passwd", "messages": []}
+        self.assertEqual(turn_worker._collect_artifacts(result), [])
+
+    def test_refuses_traversal_escape(self):
+        result = {"final_response": f"MEDIA:{turn_worker._HOME}/../../../etc/hosts", "messages": []}
+        self.assertEqual(turn_worker._collect_artifacts(result), [])
