@@ -254,3 +254,56 @@ class SandboxEnvContainmentTests(WorkerEnvIsolation):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackgroundReviewJoinTests(unittest.TestCase):
+    """divergence #2: _join_background_review waits for the daemon 'bg-review' thread so its
+    memory write lands, but is bounded by the wall budget and never blocks indefinitely."""
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in ("BG_REVIEW_JOIN_SECONDS", "RUNTIME_MAX_WALL_SECONDS")}
+        os.environ["RUNTIME_MAX_WALL_SECONDS"] = "100000"  # keep the wall-cap out of the way
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_waits_for_a_quick_bg_review_to_finish(self):
+        import threading
+        import time
+
+        done = threading.Event()
+
+        def _review():
+            time.sleep(0.2)
+            done.set()
+
+        t = threading.Thread(target=_review, daemon=True, name="bg-review")
+        t.start()
+        os.environ["BG_REVIEW_JOIN_SECONDS"] = "5"
+        turn_worker._join_background_review()
+        self.assertTrue(done.is_set(), "should have waited for the bg-review write to land")
+        self.assertFalse(t.is_alive())
+
+    def test_bounded_by_budget_for_a_hung_review(self):
+        import threading
+        import time
+
+        stop = threading.Event()
+        t = threading.Thread(target=lambda: stop.wait(30), daemon=True, name="bg-review")
+        t.start()
+        os.environ["BG_REVIEW_JOIN_SECONDS"] = "0.3"
+        try:
+            t0 = time.monotonic()
+            turn_worker._join_background_review()
+            elapsed = time.monotonic() - t0
+        finally:
+            stop.set()
+        self.assertLess(elapsed, 3.0, "join must be bounded by the budget, not the thread's lifetime")
+
+
+if __name__ == "__main__":
+    unittest.main()

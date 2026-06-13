@@ -30,6 +30,9 @@ os.environ.setdefault("HERMES_DISABLE_LAZY_INSTALLS", "1")  # no runtime pip
 os.environ.setdefault("TERMINAL_ENV", "e2b")  # code-exec runs in the E2B sandbox
 # E2B_API_KEY (platform key) + E2B_TEMPLATE are injected by the parent's env.
 
+# Process start (≈ server spawn) — used to bound the bg-review join under the server wall-kill.
+_WORKER_START = time.monotonic()
+
 # H24: framed result channel — the parent extracts the result by the LAST sentinel line.
 RESULT_SENTINEL = "===TURN_RESULT_v1==="
 
@@ -301,6 +304,24 @@ def _materialize_home(req: dict) -> None:
         f.write(mem.get("user_md", ""))
 
 
+def _join_background_review() -> None:
+    """divergence #2: stock Hermes spawns a daemon "bg-review" thread (run_agent.py:1440) ~every
+    10th turn that runs an LLM memory review and then writes MEMORY.md/USER.md. In our per-turn
+    model the process would exit and rmtree the home BEFORE that write lands — silently losing the
+    memory update (and burning the LLM call). Join it before _read_memory()/exit so the write is
+    captured + returned for Django to persist. Bounded by the remaining wall budget so we never
+    push past the server's hard kill; daemon=True means an over-long review still can't block exit.
+    """
+    import threading
+
+    max_wall = float(os.environ.get("RUNTIME_MAX_WALL_SECONDS", "300"))
+    budget = float(os.environ.get("BG_REVIEW_JOIN_SECONDS", "45"))
+    deadline = min(time.monotonic() + budget, _WORKER_START + max_wall - 5.0)
+    for t in threading.enumerate():
+        if t.name == "bg-review" and t.is_alive():
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
 def _read_memory() -> dict:
     def _r(name):
         try:
@@ -374,6 +395,9 @@ def run_turn(req: dict) -> dict:
         conversation_history=session.get("history") or [],
         task_id=session.get("id") or uuid.uuid4().hex,
     )
+
+    _join_background_review()  # divergence #2: let the bg memory-review write land before exit
+
     try:
         agent.close()
     except Exception:
