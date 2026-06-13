@@ -252,10 +252,6 @@ class SandboxEnvContainmentTests(WorkerEnvIsolation):
         self.assertIn("oxy-key-654321", turn_worker._scrub_set(None))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class BackgroundReviewJoinTests(unittest.TestCase):
     """divergence #2: _join_background_review waits for the daemon 'bg-review' thread so its
     memory write lands, but is bounded by the wall budget and never blocks indefinitely."""
@@ -305,18 +301,14 @@ class BackgroundReviewJoinTests(unittest.TestCase):
         self.assertLess(elapsed, 3.0, "join must be bounded by the budget, not the thread's lifetime")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CollectArtifactsTests(unittest.TestCase):
-    """divergence #4: _collect_artifacts reads MEDIA:<path> files but is path-confined to
-    HERMES_HOME (a marker can never exfil an arbitrary host file)."""
+    """divergence #4: _collect_artifacts reads MEDIA:<path> files but is confined to
+    HERMES_HOME/cache/ — never config.yaml/.env/memories or an arbitrary host file."""
 
-    def test_reads_media_file_under_home(self):
+    def test_reads_media_file_under_cache(self):
         import base64
 
-        path = os.path.join(turn_worker._HOME, "cache_shot.png")
+        path = os.path.join(turn_worker._HOME, "cache", "images", "shot.png")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(b"PNGBYTES")
@@ -326,11 +318,27 @@ class CollectArtifactsTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(arts[0]["b64"]), b"PNGBYTES")
         self.assertEqual(arts[0]["marker"], f"MEDIA:{path}")
 
+    def test_refuses_home_root_file(self):
+        # SECRET-LEAK GUARD: config.yaml (MCP bearer), .env and memories/ live at the HERMES_HOME
+        # ROOT; a tool-result marker pointing at any non-cache/ path must NOT be collected. Use a
+        # throwaway root file (not the real config.yaml, which other tests assert is 0o600).
+        root_secret = os.path.join(turn_worker._HOME, "root_secret_marker.yaml")
+        with open(root_secret, "w") as f:
+            f.write("Authorization: Bearer SECRET")
+        try:
+            result = {"final_response": "x", "messages": [{"role": "tool", "content": f"MEDIA:{root_secret}"}]}
+            self.assertEqual(turn_worker._collect_artifacts(result), [])
+        finally:
+            os.remove(root_secret)
+
     def test_refuses_path_outside_home(self):
-        # A marker pointing at a host file (e.g. /etc/passwd) must NOT be read.
         result = {"final_response": "MEDIA:/etc/passwd", "messages": []}
         self.assertEqual(turn_worker._collect_artifacts(result), [])
 
     def test_refuses_traversal_escape(self):
-        result = {"final_response": f"MEDIA:{turn_worker._HOME}/../../../etc/hosts", "messages": []}
+        result = {"final_response": f"MEDIA:{turn_worker._HOME}/cache/../../../etc/hosts", "messages": []}
         self.assertEqual(turn_worker._collect_artifacts(result), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

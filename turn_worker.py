@@ -30,6 +30,9 @@ _HOME = os.environ.get("HERMES_HOME") or tempfile.mkdtemp(prefix="turn-")
 os.environ["HERMES_HOME"] = _HOME
 os.environ.setdefault("HERMES_DISABLE_LAZY_INSTALLS", "1")  # no runtime pip
 os.environ.setdefault("TERMINAL_ENV", "e2b")  # code-exec runs in the E2B sandbox
+# Hosted turns are ALWAYS ephemeral: never let a BYOK Modal/Daytona sandbox persist/resume
+# filesystem state across turns (terminal_tool reads this; default would be "true").
+os.environ["TERMINAL_CONTAINER_PERSISTENT"] = "false"
 # E2B_API_KEY (platform key) + E2B_TEMPLATE are injected by the parent's env.
 
 # Process start (≈ server spawn) — used to bound the bg-review join under the server wall-kill.
@@ -342,7 +345,11 @@ def _collect_artifacts(result: dict) -> list:
     for m in result.get("messages") or []:
         if isinstance(m, dict) and isinstance(m.get("content"), str):
             texts.append(m["content"])
-    home = os.path.realpath(_HOME)
+    # Confine to the ARTIFACT cache dir ONLY — never the HERMES_HOME root, which also holds
+    # config.yaml (the MCP bearer), .env, and memories/. A compromised tool result could otherwise
+    # plant MEDIA:<HERMES_HOME>/config.yaml and exfil the bearer via the delivered URL. Hermes
+    # writes generated images / screenshots / MCP media under cache/ (gateway base.py).
+    cache_root = os.path.realpath(os.path.join(_HOME, "cache"))
     seen: set[str] = set()
     artifacts: list = []
     total = 0
@@ -352,8 +359,9 @@ def _collect_artifacts(result: dict) -> list:
                 continue
             seen.add(path)
             real = os.path.realpath(path)
-            # Only files genuinely under HERMES_HOME — never follow a marker to a host path.
-            if not (real == home or real.startswith(home + os.sep)) or not os.path.isfile(real):
+            # Only files genuinely under HERMES_HOME/cache/ — never a marker to config.yaml/.env/
+            # memories or any host path.
+            if not real.startswith(cache_root + os.sep) or not os.path.isfile(real):
                 continue
             try:
                 size = os.path.getsize(real)
@@ -446,7 +454,10 @@ def run_turn(req: dict) -> dict:
     result = agent.run_conversation(
         req["message"]["text"],
         conversation_history=session.get("history") or [],
-        task_id=session.get("id") or uuid.uuid4().hex,
+        # Per-turn UNIQUE task_id: we carry conversation continuity ourselves (session_db=None;
+        # Django hydrates history), so the only effect of task_id is the code-exec sandbox name —
+        # a unique one per turn guarantees BYOK Modal/Daytona can't resume a prior turn's sandbox.
+        task_id=uuid.uuid4().hex,
     )
 
     _join_background_review()  # divergence #2: let the bg memory-review write land before exit
