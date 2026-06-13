@@ -36,7 +36,7 @@ git diff --name-status origin/main
 | `tools/environments/e2b.py` | Call `self.init_session()` at end of `__init__` (guarded). | **Parity** with `docker.py`/`modal.py`: persist shell env/functions across terminal calls within a turn. Guarded → snapshot failure degrades to stateless, never breaks exec. |
 | `server.py` | `RUNTIME_MAX_WALL_SECONDS` default `150 → 300`. | Headroom for the stock 90-iteration budget so turns finish gracefully instead of hitting SIGKILL. |
 | `Dockerfile.runtime` | Runtime pip extras: `e2b`, `ddgs` (keyless web search), the web/image plugins, and the BYOK sandbox SDKs `modal==1.3.4` + `daytona==0.155.0`. | These ship in the image because Hermes leaves them as optional extras; our serving path needs them present. |
-| `deploy/service.yaml` | Image `:v3 → :v4`; add `timeoutSeconds: 360`. | Ship the parity build; request deadline above the 300s wall. |
+| `deploy/service.yaml` | Image pinned to `:v10` (in lockstep with `cloudbuild.yaml`); `timeoutSeconds: 360`. | Ship the current parity+hardening build; request deadline above the 300s wall. (Was `:v4` pre-Phase-3/4; bumped as hardening revisions shipped.) |
 | `.dockerignore` | Exclude `stub_llm.py`, `stub_mcp.py`. | Stop shipping test stubs (`stub_mcp` logs the inbound bearer to `/tmp`). |
 
 ## Runtime configuration the wrapper injects (not file forks)
@@ -45,8 +45,12 @@ These are set by `turn_worker.py` / Django per turn — they configure stock
 Hermes, they don't modify it:
 
 - **Toolset** (`enabled_toolsets`, the parity set): `insightfulpipe` (MCP, read-only),
-  `memory`, `clarify`, `terminal` (E2B), `file` (E2B-scoped), `todo`, `web`
-  (SSRF-gated), `vision` (SSRF-gated). All are upstream toolsets, unmodified.
+  `memory`, `terminal` (E2B), `file` (E2B-scoped), `todo`, `web` (SSRF-gated),
+  `vision` (SSRF-gated), plus `browser`/`image_gen` when the agent carries that BYOK
+  key. All are upstream toolsets, unmodified. **`clarify` is NOT shipped** — dropped
+  from the default (commit 6ec757e8, turn_worker maps logical `tools` with no clarify
+  branch) because it can never resolve in an async single-shot turn; advertising it
+  just burns iterations.
 - **`max_iterations = 90`** — stock Hermes default (was 16).
 - **`web.backend`** in `config.yaml` — `oxylabs` when the request carries a BYOK
   key (injected as `OXYLABS_API_KEY`), else keyless `ddgs`. Name whitelisted.
@@ -152,3 +156,20 @@ Regenerate the raw footprint any time with `git diff --name-status origin/main`.
 | `ci_guard_runtime.py` | Gates 4–6: gate-16 spawn-shape check (`server._child_env()` carries no secret-shaped key beyond the `E2B_API_KEY` passthrough), `tools/url_safety` metadata-floor regression pin (169.254.169.254 + metadata.google.internal), and H24 framing-sentinel identity check across `server.py`/`turn_worker.py` (text-level). | Makes the spawn-boundary, SSRF-floor, and result-framing promises self-enforcing in CI. |
 | `tests_runtime/test_env_hardening.py` | New (cluster E): unit tests for the H27 reaper/breadcrumb/lifetime clamp and the H41 oxylabs gate; SDK surfaces stubbed via sys.modules, no network, stdlib-only imports. | Falsifiable DONE gates for the fork-side H27/H41 changes. |
 | `server.py` | H27 parent half: `finally` reads `$HERMES_HOME/.sandbox_id` and best-effort `kill_sandbox()`s each id before `_rmtree` (normal turns unrecord theirs — orphans only). | A SIGKILLed worker cannot run its own sandbox cleanup; the 300s lifetime clamp is the backstop. |
+
+## Phase-4 hardening (2026-06-13, HARDENING_PLAN.md H29–H31/H34/H35 + H38a — runtime half)
+
+The KMS signing (H29), key rotation (H30), CMEK (H31), abuse caps (H34) and webhook-role
+split (H35) are mostly Django-side (PR #48). The runtime fork carries only the H30 verifier
+half + the extended IAM audit:
+
+| File | Change | Why |
+|---|---|---|
+| `server.py` | H30 kid-keyed verifier: `_parse_public_keys_json(RUNTIME_JWT_PUBLIC_KEYS_JSON)` builds a `{kid: PEM}` set; `_verify_jwt` selects the PEM by the token's `kid` header (kid-less → the single `RUNTIME_JWT_PUBLIC_KEY`; unknown kid → 401). | The KMS signer (Django `sign_turn_jwt_kms`) stamps `kid` = the KMS key-version resource, so rotation is add-PEM → switch signer → drop old without a lockstep image rebuild. Malformed env JSON fails at import (deploy), never per-turn. |
+| `deploy/audit_iam.sh` | H38a: invoker set asserted == exactly `agent-control@` (not the old gmail); runtime SA `secretAccessor` == exactly `{e2b-api-key}`; auditConfigs now also require `cloudkms.googleapis.com DATA_READ` (H5 extended for the H29 KMS signer). | Makes the Phase-0 identity split + KMS audit-log promise self-enforcing as a deploy-blocking C9 gate. |
+| `tests_runtime/test_server_kid.py` | Unit tests for the H30 kid selection paths (RSA keypairs via cryptography; imports `server.py` only). | Falsifiable gate for the kid verifier. Not shipped in the image. |
+
+**Residual (H40):** with no Render OIDC/WIF (H6), KMS removes key *persistence* + adds
+revocation/audit but a static-key holder can still CALL KMS to sign — it does not remove the
+signing capability from a key thief. CMEK (H31) only protects new secret versions, which is why
+H31 mandates rotating every live version. Both stated in HARDENING_PLAN, not implied away here.

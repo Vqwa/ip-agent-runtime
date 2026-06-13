@@ -35,7 +35,9 @@ redeploy — add a new version and the next cold start picks it up:
 
 ```bash
 echo -n "<new value>" | gcloud secrets versions add e2b-api-key \
-  --data-file=- --project=ip-agent-runtime          # or: jwt-public-key
+  --data-file=- --project=ip-agent-runtime
+# (The JWT public key is a plain env value on the service since H1 — rotate it
+#  by editing deploy/service.yaml's RUNTIME_JWT_PUBLIC_KEY, not via Secret Manager.)
 # force fresh containers to pick up :latest immediately
 gcloud run services update ip-agent-runtime --region=europe-west1 \
   --project=ip-agent-runtime --no-traffic --tag=rotate && \
@@ -57,9 +59,10 @@ EXPECTED_INVOKER=serviceAccount:<django-dispatch-sa>@ip-agent-runtime.iam.gservi
 - (a) `run.invoker` has NEITHER `allUsers` NOR `allAuthenticatedUsers`.
 - (b) `run.invoker` members == only `EXPECTED_INVOKER` (+ optional
   `EXPECTED_TEST_INVOKER`).
-- (c) the `agent-runtime` SA holds `secretAccessor` on EXACTLY
-  `{jwt-public-key, e2b-api-key}` and on no other secret — the load-bearing
-  isolation invariant (it must NEVER read a per-tenant secret).
+- (c) the runtime SA (`runtime-svc@`) holds `secretAccessor` on EXACTLY
+  `{e2b-api-key}` and on no other secret — the load-bearing isolation invariant
+  (it must NEVER read a per-tenant secret). The JWT public key is a plain env
+  value (H1, 2026-06-12), not a mounted secret, so it is not in this set.
 - (d) ingress is `all` by design, so invocation is gated by IAM only;
   `--no-allow-unauthenticated` must remain in effect (policy stays private).
 
