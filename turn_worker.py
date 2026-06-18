@@ -12,7 +12,9 @@ The FastAPI parent normally sets HERMES_HOME before spawning this process; we
 create a fresh ephemeral one if unset so the worker is runnable standalone.
 """
 
+import base64
 import json
+import mimetypes
 import os
 import re
 import sys
@@ -28,7 +30,13 @@ _HOME = os.environ.get("HERMES_HOME") or tempfile.mkdtemp(prefix="turn-")
 os.environ["HERMES_HOME"] = _HOME
 os.environ.setdefault("HERMES_DISABLE_LAZY_INSTALLS", "1")  # no runtime pip
 os.environ.setdefault("TERMINAL_ENV", "e2b")  # code-exec runs in the E2B sandbox
+# Hosted turns are ALWAYS ephemeral: never let a BYOK Modal/Daytona sandbox persist/resume
+# filesystem state across turns (terminal_tool reads this; default would be "true").
+os.environ["TERMINAL_CONTAINER_PERSISTENT"] = "false"
 # E2B_API_KEY (platform key) + E2B_TEMPLATE are injected by the parent's env.
+
+# Process start (≈ server spawn) — used to bound the bg-review join under the server wall-kill.
+_WORKER_START = time.monotonic()
 
 # H24: framed result channel — the parent extracts the result by the LAST sentinel line.
 RESULT_SENTINEL = "===TURN_RESULT_v1==="
@@ -301,6 +309,80 @@ def _materialize_home(req: dict) -> None:
         f.write(mem.get("user_md", ""))
 
 
+def _join_background_review() -> None:
+    """divergence #2: stock Hermes spawns a daemon "bg-review" thread (run_agent.py:1440) ~every
+    10th turn that runs an LLM memory review and then writes MEMORY.md/USER.md. In our per-turn
+    model the process would exit and rmtree the home BEFORE that write lands — silently losing the
+    memory update (and burning the LLM call). Join it before _read_memory()/exit so the write is
+    captured + returned for Django to persist. Bounded by the remaining wall budget so we never
+    push past the server's hard kill; daemon=True means an over-long review still can't block exit.
+    """
+    import threading
+
+    max_wall = float(os.environ.get("RUNTIME_MAX_WALL_SECONDS", "300"))
+    budget = float(os.environ.get("BG_REVIEW_JOIN_SECONDS", "45"))
+    deadline = min(time.monotonic() + budget, _WORKER_START + max_wall - 5.0)
+    for t in threading.enumerate():
+        if t.name == "bg-review" and t.is_alive():
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
+# Artifact collection (divergence #4): files the turn generated live under HERMES_HOME and are
+# rmtree'd right after; collect the MEDIA:<path>-marked ones (image_gen / screenshots / MCP media)
+# so Django can upload + deliver them. Caps keep the base64 well under the server stdout budget;
+# larger artifacts are skipped (a runtime-direct-upload path is the documented follow-up).
+_MEDIA_RE = re.compile(r"MEDIA:(\S+)")
+_MAX_ARTIFACT_BYTES = 2 * 1024 * 1024  # 2 MiB/file
+_MAX_ARTIFACTS_TOTAL_BYTES = 4 * 1024 * 1024  # 4 MiB total (raw), safely under the 8 MiB stdout cap
+_MAX_ARTIFACTS = 6
+
+
+def _collect_artifacts(result: dict) -> list:
+    """Read MEDIA:<path> files the turn produced (final response + tool results) for delivery.
+    PATH-CONFINED to HERMES_HOME so an attacker-influenced marker can't exfil arbitrary host
+    files; bounded per-file and in aggregate. Returns [{marker, filename, content_type, b64}]."""
+    texts = [str(result.get("final_response") or "")]
+    for m in result.get("messages") or []:
+        if isinstance(m, dict) and isinstance(m.get("content"), str):
+            texts.append(m["content"])
+    # Confine to the ARTIFACT cache dir ONLY — never the HERMES_HOME root, which also holds
+    # config.yaml (the MCP bearer), .env, and memories/. A compromised tool result could otherwise
+    # plant MEDIA:<HERMES_HOME>/config.yaml and exfil the bearer via the delivered URL. Hermes
+    # writes generated images / screenshots / MCP media under cache/ (gateway base.py).
+    cache_root = os.path.realpath(os.path.join(_HOME, "cache"))
+    seen: set[str] = set()
+    artifacts: list = []
+    total = 0
+    for blob in texts:
+        for path in _MEDIA_RE.findall(blob):
+            if path in seen or len(artifacts) >= _MAX_ARTIFACTS:
+                continue
+            seen.add(path)
+            real = os.path.realpath(path)
+            # Only files genuinely under HERMES_HOME/cache/ — never a marker to config.yaml/.env/
+            # memories or any host path.
+            if not real.startswith(cache_root + os.sep) or not os.path.isfile(real):
+                continue
+            try:
+                size = os.path.getsize(real)
+                if size > _MAX_ARTIFACT_BYTES or total + size > _MAX_ARTIFACTS_TOTAL_BYTES:
+                    continue
+                with open(real, "rb") as f:
+                    data = f.read()
+            except OSError:
+                continue
+            total += len(data)
+            artifacts.append(
+                {
+                    "marker": f"MEDIA:{path}",
+                    "filename": os.path.basename(real),
+                    "content_type": mimetypes.guess_type(real)[0] or "application/octet-stream",
+                    "b64": base64.b64encode(data).decode(),
+                }
+            )
+    return artifacts
+
+
 def _read_memory() -> dict:
     def _r(name):
         try:
@@ -372,8 +454,15 @@ def run_turn(req: dict) -> dict:
     result = agent.run_conversation(
         req["message"]["text"],
         conversation_history=session.get("history") or [],
-        task_id=session.get("id") or uuid.uuid4().hex,
+        # Per-turn UNIQUE task_id: we carry conversation continuity ourselves (session_db=None;
+        # Django hydrates history), so task_id only feeds the code-exec sandbox name. Ephemerality
+        # is GUARANTEED by TERMINAL_CONTAINER_PERSISTENT=false (set above); the unique id is
+        # defense-in-depth so a sandbox name can't collide/resume across turns.
+        task_id=uuid.uuid4().hex,
     )
+
+    _join_background_review()  # divergence #2: let the bg memory-review write land before exit
+
     try:
         agent.close()
     except Exception:
@@ -386,6 +475,7 @@ def run_turn(req: dict) -> dict:
         "reply_text": result.get("final_response", ""),
         "messages": result.get("messages", []),
         "memory": _read_memory(),
+        "artifacts": _collect_artifacts(result),  # divergence #4 — collected before HERMES_HOME is rmtree'd
         "usage": {
             "input_tokens": result.get("input_tokens", 0),
             "output_tokens": result.get("output_tokens", 0),

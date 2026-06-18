@@ -252,5 +252,93 @@ class SandboxEnvContainmentTests(WorkerEnvIsolation):
         self.assertIn("oxy-key-654321", turn_worker._scrub_set(None))
 
 
+class BackgroundReviewJoinTests(unittest.TestCase):
+    """divergence #2: _join_background_review waits for the daemon 'bg-review' thread so its
+    memory write lands, but is bounded by the wall budget and never blocks indefinitely."""
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in ("BG_REVIEW_JOIN_SECONDS", "RUNTIME_MAX_WALL_SECONDS")}
+        os.environ["RUNTIME_MAX_WALL_SECONDS"] = "100000"  # keep the wall-cap out of the way
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_waits_for_a_quick_bg_review_to_finish(self):
+        import threading
+        import time
+
+        done = threading.Event()
+
+        def _review():
+            time.sleep(0.2)
+            done.set()
+
+        t = threading.Thread(target=_review, daemon=True, name="bg-review")
+        t.start()
+        os.environ["BG_REVIEW_JOIN_SECONDS"] = "5"
+        turn_worker._join_background_review()
+        self.assertTrue(done.is_set(), "should have waited for the bg-review write to land")
+        self.assertFalse(t.is_alive())
+
+    def test_bounded_by_budget_for_a_hung_review(self):
+        import threading
+        import time
+
+        stop = threading.Event()
+        t = threading.Thread(target=lambda: stop.wait(30), daemon=True, name="bg-review")
+        t.start()
+        os.environ["BG_REVIEW_JOIN_SECONDS"] = "0.3"
+        try:
+            t0 = time.monotonic()
+            turn_worker._join_background_review()
+            elapsed = time.monotonic() - t0
+        finally:
+            stop.set()
+        self.assertLess(elapsed, 3.0, "join must be bounded by the budget, not the thread's lifetime")
+
+
+class CollectArtifactsTests(unittest.TestCase):
+    """divergence #4: _collect_artifacts reads MEDIA:<path> files but is confined to
+    HERMES_HOME/cache/ — never config.yaml/.env/memories or an arbitrary host file."""
+
+    def test_reads_media_file_under_cache(self):
+        import base64
+
+        path = os.path.join(turn_worker._HOME, "cache", "images", "shot.png")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"PNGBYTES")
+        result = {"final_response": f"see MEDIA:{path}", "messages": []}
+        arts = turn_worker._collect_artifacts(result)
+        self.assertEqual(len(arts), 1)
+        self.assertEqual(base64.b64decode(arts[0]["b64"]), b"PNGBYTES")
+        self.assertEqual(arts[0]["marker"], f"MEDIA:{path}")
+
+    def test_refuses_home_root_file(self):
+        # SECRET-LEAK GUARD: config.yaml (MCP bearer), .env and memories/ live at the HERMES_HOME
+        # ROOT; a tool-result marker pointing at any non-cache/ path must NOT be collected. Use a
+        # throwaway root file (not the real config.yaml, which other tests assert is 0o600).
+        root_secret = os.path.join(turn_worker._HOME, "root_secret_marker.yaml")
+        with open(root_secret, "w") as f:
+            f.write("Authorization: Bearer SECRET")
+        try:
+            result = {"final_response": "x", "messages": [{"role": "tool", "content": f"MEDIA:{root_secret}"}]}
+            self.assertEqual(turn_worker._collect_artifacts(result), [])
+        finally:
+            os.remove(root_secret)
+
+    def test_refuses_path_outside_home(self):
+        result = {"final_response": "MEDIA:/etc/passwd", "messages": []}
+        self.assertEqual(turn_worker._collect_artifacts(result), [])
+
+    def test_refuses_traversal_escape(self):
+        result = {"final_response": f"MEDIA:{turn_worker._HOME}/cache/../../../etc/hosts", "messages": []}
+        self.assertEqual(turn_worker._collect_artifacts(result), [])
+
+
 if __name__ == "__main__":
     unittest.main()
